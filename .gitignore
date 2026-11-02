@@ -1,0 +1,5 @@
+/target
+/src-tauri/binaries/
+/src-tauri/resources/
+/src-tauri/gen/
+.DS_Store

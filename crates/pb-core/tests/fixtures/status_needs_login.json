@@ -1,0 +1,16 @@
+{
+  "Version": "1.104.1-libtailscale",
+  "BackendState": "NeedsLogin",
+  "AuthURL": "https://login.tailscale.com/a/abc123",
+  "TailscaleIPs": null,
+  "Self": {
+    "ID": "",
+    "HostName": "phonebridge-mac",
+    "DNSName": "",
+    "OS": "macOS",
+    "Online": false
+  },
+  "Health": ["You are logged out."],
+  "CurrentTailnet": null,
+  "Peer": null
+}

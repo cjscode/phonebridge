@@ -1,0 +1,14 @@
+scrcpy 5.0.1 <https://github.com/Genymobile/scrcpy>
+INFO: ADB device found:
+INFO:     -->   (tcpip)  127.0.0.1:41234                device  Pixel_9
+/Users/x/PhoneBridge.app/Contents/Resources/scrcpy-server: 1 file pushed, 0 skipped. 61.2 MB/s (733930 bytes in 0.011s)
+[server] INFO: Device: [Google] google Pixel 9 (Android 16)
+[server] INFO: List of apps:
+ * Messages                       com.google.android.apps.messaging
+ * Settings                       com.android.settings
+ - ABCDEFGHIJKLMNOPQRSTUVWXYZabc  com.example.edge
+ - A Very Long Application Name That Wraps
+                                  com.example.verylongname
+ - Firefox                        org.mozilla.firefox
+ - WhatsApp  Beta                 com.whatsapp
+ * Camera                         com.google.android.GoogleCamera

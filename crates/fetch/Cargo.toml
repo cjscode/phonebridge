@@ -1,0 +1,12 @@
+[package]
+name = "fetch"
+description = "Download, verify (SHA-256) and unpack pinned build inputs listed in deps.toml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+sha2.workspace = true
+toml.workspace = true

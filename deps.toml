@@ -1,0 +1,43 @@
+# Every third-party binary or toolchain the build downloads, pinned by version
+# and SHA-256. Build scripts refuse anything that doesn't match.
+#
+# To bump a pin: change the version + URL, download the file, run
+# `shasum -a 256 <file>`, and paste the new hash here.
+
+[scrcpy]
+version = "5.0.1"
+# Official static macOS builds from https://github.com/Genymobile/scrcpy/releases
+[scrcpy.archives.aarch64-apple-darwin]
+url = "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-macos-aarch64-v5.0.1.tar.gz"
+sha256 = "33611e51977a8289e2e124b220f727895181ef2eb9060e0987a4dc2db9cf0d6b"
+[scrcpy.archives.x86_64-apple-darwin]
+url = "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-macos-x86_64-v5.0.1.tar.gz"
+sha256 = "31a5467a9e907f162b093267cbbab1276b15c6e709c2ea8159566a8d165beb50"
+
+[platform-tools]
+# Android SDK platform-tools for macOS (adb is a universal binary).
+version = "37.0.1"
+url = "https://dl.google.com/android/repository/platform-tools_r37.0.1-darwin.zip"
+sha256 = "ee39ad5967e95c2a07f04dbcbde96b1a0c916ba376096db5d2f498b7727a5d1d"
+
+[go]
+# Used only at build time, to compile libtailscale. Never shipped.
+version = "1.27.3"
+[go.archives.darwin-arm64]
+url = "https://go.dev/dl/go1.27.3.darwin-arm64.tar.gz"
+sha256 = "dd3908cf20959d798c1e06ebe5b72213f0505ce01373b40ce3110975a6cd99c2"
+[go.archives.darwin-amd64]
+url = "https://go.dev/dl/go1.27.3.darwin-amd64.tar.gz"
+sha256 = "b6f8e931e4ab497fcde6da8ae4499a58f9d258e55c8a80824a516eae5950a750"
+[go.archives.linux-amd64]
+url = "https://go.dev/dl/go1.27.3.linux-amd64.tar.gz"
+sha256 = "65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40"
+[go.archives.linux-arm64]
+url = "https://go.dev/dl/go1.27.3.linux-arm64.tar.gz"
+sha256 = "a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49"
+
+[libtailscale]
+# Vendored in crates/libtailscale-sys/vendor/libtailscale. Go module deps are
+# verified by that directory's go.sum.
+repo = "https://github.com/tailscale/libtailscale"
+commit = "ac7ed43af14e19e1c1810ee9f8319872c6beb412"

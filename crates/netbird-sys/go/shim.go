@@ -123,8 +123,8 @@ func nb_new(optsJSON *C.char, errOut **C.char) C.int {
 	if o.LogFD >= 0 {
 		logOut = os.NewFile(uintptr(o.LogFD), "netbird-log")
 	}
-	lazy := false     // connect to peers eagerly, so their status means something
-	wgPort := 0       // random UDP port: never clash with an installed NetBird agent
+	lazy := false // connect to peers eagerly, so their status means something
+	wgPort := 0   // random UDP port: never clash with an installed NetBird agent
 	opts := embed.Options{
 		DeviceName:            o.DeviceName,
 		ManagementURL:         o.ManagementURL,
@@ -216,6 +216,9 @@ type peerJSON struct {
 }
 
 type statusJSON struct {
+	// Synced is true once the first network map arrived from management;
+	// before that the peer list is incomplete.
+	Synced              bool       `json:"synced"`
 	ManagementURL       string     `json:"management_url"`
 	ManagementConnected bool       `json:"management_connected"`
 	ManagementError     string     `json:"management_error"`
@@ -262,7 +265,9 @@ func nb_status_json(h C.int, out **C.char, errOut **C.char) C.int {
 		LocalPubKey:         st.LocalPeerState.PubKey,
 		Peers:               make([]peerJSON, 0, len(st.Peers)),
 	}
+	seen := make(map[string]bool, len(st.Peers))
 	for _, p := range st.Peers {
+		seen[p.PubKey] = true
 		s.Peers = append(s.Peers, peerJSON{
 			PubKey:         p.PubKey,
 			IP:             p.IP,
@@ -278,6 +283,23 @@ func nb_status_json(h C.int, out **C.char, errOut **C.char) C.int {
 			BytesRx:        p.BytesRx,
 			BytesTx:        p.BytesTx,
 		})
+	}
+	// The network map is the authoritative peer list; the status recorder only
+	// knows peers the engine has started handling. Add any it doesn't know yet.
+	if resp, err := c.GetLatestSyncResponse(); err == nil && resp != nil && resp.GetNetworkMap() != nil {
+		s.Synced = true
+		for _, rp := range resp.GetNetworkMap().GetRemotePeers() {
+			key := rp.GetWgPubKey()
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			ip := ""
+			if ips := rp.GetAllowedIps(); len(ips) > 0 {
+				ip = ips[0]
+			}
+			s.Peers = append(s.Peers, peerJSON{PubKey: key, IP: ip, FQDN: rp.GetFqdn(), ConnStatus: "Idle"})
+		}
 	}
 	data, err := json.Marshal(s)
 	if err != nil {
@@ -349,11 +371,11 @@ func pipe(a, b net.Conn) {
 // ---- browser (SSO) login ----------------------------------------------------
 
 type providerConfig struct {
-	ClientID, ClientSecret, Audience, Scope    string
+	ClientID, ClientSecret, Audience, Scope     string
 	AuthEndpoint, TokenEndpoint, DeviceEndpoint string
-	RedirectURLs                               []string
-	UseIDToken, DisablePromptLogin             bool
-	LoginFlag                                  uint32
+	RedirectURLs                                []string
+	UseIDToken, DisablePromptLogin              bool
+	LoginFlag                                   uint32
 }
 
 type ssoFlow struct {
@@ -372,6 +394,9 @@ type ssoFlow struct {
 	cancel     context.CancelFunc
 	ctx        context.Context
 }
+
+// How long a browser login may take before we give up.
+const ssoTimeout = 10 * time.Minute
 
 type tokenResult struct {
 	token string
@@ -504,7 +529,7 @@ func beginPKCE(p providerConfig) (*ssoFlow, error) {
 		return nil, err
 	}
 	f := &ssoFlow{kind: "pkce", provider: p, state: state, verifier: verifier,
-		result: make(chan tokenResult, 1), expires: time.Now().Add(5 * time.Minute)}
+		result: make(chan tokenResult, 1), expires: time.Now().Add(ssoTimeout)}
 	f.ctx, f.cancel = context.WithDeadline(context.Background(), f.expires)
 
 	// Listen on the first configured redirect URL whose port is free, on both
@@ -624,8 +649,7 @@ func (f *ssoFlow) pollDevice() {
 	for {
 		select {
 		case <-f.ctx.Done():
-			f.result <- tokenResult{err: errors.New("login timed out")}
-			return
+			return // nb_sso_wait reports timeout / cancellation
 		case <-time.After(f.interval):
 		}
 		form := url.Values{
@@ -697,7 +721,10 @@ func nb_sso_wait(id C.int, tokenOut **C.char, errOut **C.char) C.int {
 		putString(tokenOut, res.token)
 		return 0
 	case <-f.ctx.Done():
-		return fail(errOut, errors.New("login cancelled or timed out"))
+		if errors.Is(f.ctx.Err(), context.DeadlineExceeded) {
+			return fail(errOut, fmt.Errorf("the browser login wasn't finished within %d minutes", int(ssoTimeout.Minutes())))
+		}
+		return fail(errOut, errors.New("login cancelled"))
 	}
 }
 

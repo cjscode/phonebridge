@@ -112,6 +112,7 @@ fn snapshot(running: bool, phone_online: bool) -> NetSnapshot {
             reason: None,
         }
     });
+    s.synced = running;
     if running {
         s.peers.push(Peer {
             id: PHONE_ID.into(),
@@ -281,6 +282,36 @@ async fn offline_peer_is_unreachable_then_recovers() {
 async fn idle_peer_is_still_tried() {
     // NetBird has no online flag: a peer that isn't connected yet may still answer.
     let rig = Rig::new(true, false, DialMode::Ok, true).await;
+    rig.wait_for("connected", ConnectionStatus::is_connected)
+        .await;
+    rig.handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn waits_for_first_sync_before_saying_phone_is_gone() {
+    // Running but the network map hasn't arrived: no peers yet.
+    let rig = Rig::new(true, true, DialMode::Ok, true).await;
+    rig.wait_for("connected", ConnectionStatus::is_connected)
+        .await;
+    rig.handle.disconnect().await;
+    rig.wait_for("disconnected", |s| *s == ConnectionStatus::Disconnected)
+        .await;
+    let mut unsynced = snapshot(true, true);
+    unsynced.synced = false;
+    unsynced.peers.clear();
+    rig.net.send_replace(unsynced);
+    rig.handle.connect_now().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !matches!(
+            rig.handle.status(),
+            ConnectionStatus::PhoneUnreachable { .. }
+        ),
+        "{:?}",
+        rig.handle.status()
+    );
+    // The map arrives: connects.
+    rig.net.send_replace(snapshot(true, true));
     rig.wait_for("connected", ConnectionStatus::is_connected)
         .await;
     rig.handle.shutdown().await;

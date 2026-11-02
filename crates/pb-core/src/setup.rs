@@ -25,6 +25,13 @@ pub async fn find_usb_phone(adb: &Adb) -> Result<UsbPhone, AppError> {
     let usb = adb.usb_devices().await?;
     let dev = match usb.as_slice() {
         [] => {
+            if adb.tools().adb_server_port != 5037 && default_adb_server_running() {
+                return Err(AppError::new(
+                    ErrorCode::NoUsbDevice,
+                    "Another adb is using the phone's USB connection",
+                )
+                .hint("An adb server outside PhoneBridge is running (port 5037), and only one can use the phone over USB. Quit Android Studio or other Android tools, or run `adb kill-server`, then try again."));
+            }
             return Err(AppError::new(ErrorCode::NoUsbDevice, "No phone found on USB")
                 .hint("Plug the phone in with a data cable, unlock it, and make sure USB debugging is on (Settings → Developer options)."));
         }
@@ -75,6 +82,12 @@ pub async fn find_usb_phone(adb: &Adb) -> Result<UsbPhone, AppError> {
         android_version,
         ips,
     })
+}
+
+/// Is a standard adb server (port 5037) running? It would hold the USB device.
+fn default_adb_server_running() -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 5037));
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
 }
 
 /// Restart adbd on the phone listening on `port` (it keeps this until reboot).

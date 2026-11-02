@@ -29,7 +29,7 @@ use pb_core::tools::BundledTools;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: probe [--state DIR] [--name NAME] [--setup-key KEY] [--management-url URL] \
+        "usage: probe [--state DIR] [--name NAME] [--setup-key KEY] [--management-url URL] [--relogin] \
          <login|status|peers|dial IP:PORT|forward IP|adb-test IP|scrcpy IP [--force-adb-forward]>"
     );
     ExitCode::from(2)
@@ -74,12 +74,17 @@ async fn main() -> ExitCode {
     let name = opt("--name").unwrap_or_else(|| "phonebridge-probe".into());
     let setup_key = opt("--setup-key");
     let mgmt = opt("--management-url").unwrap_or_else(|| DEFAULT_MANAGEMENT_URL.into());
-    let force_forward = if let Some(i) = args.iter().position(|a| a == "--force-adb-forward") {
-        args.remove(i);
-        true
-    } else {
-        false
+    let mut flag = |name: &str| -> bool {
+        match args.iter().position(|a| a == name) {
+            Some(i) => {
+                args.remove(i);
+                true
+            }
+            None => false,
+        }
     };
+    let force_forward = flag("--force-adb-forward");
+    let relogin = flag("--relogin");
     let Some(cmd) = args.first().cloned() else {
         return usage();
     };
@@ -90,7 +95,11 @@ async fn main() -> ExitCode {
         state.display()
     );
     let tn = NetManager::new(&state, &name, &mgmt);
-    let started = if cmd == "login" {
+    let reuse_login = cmd == "login" && setup_key.is_none() && !relogin && tn.has_saved_login();
+    if reuse_login {
+        println!("Already logged in; reusing the saved login (pass --relogin to sign in again).");
+    }
+    let started = if cmd == "login" && !reuse_login {
         match setup_key {
             Some(k) => tn.login_with_setup_key(k).await,
             None => tn.login_browser().await.map(|flow| {
@@ -157,6 +166,15 @@ fn print_snapshot(s: &NetSnapshot) {
     for h in &s.health {
         println!("health: {h}");
     }
+    println!(
+        "network map received: {}",
+        if s.synced { "yes" } else { "no" }
+    );
+    if s.synced && s.peers.is_empty() {
+        println!(
+            "no peers visible: is the phone in the same NetBird account, and do access policies allow this device to reach it?"
+        );
+    }
     if !s.peers.is_empty() {
         println!("\n{:<28} {:<10} {:<17} link", "peer", "connected", "ipv4");
         for p in &s.peers {
@@ -189,7 +207,8 @@ async fn cmd_status(tn: &Arc<NetManager>) -> R {
                 return Ok(());
             }
             NetState::Running => {
-                print_snapshot(&s);
+                drop(rx);
+                print_snapshot(&wait_synced(tn, s).await);
                 return Ok(());
             }
             NetState::Error { message, .. } => return Err(message.clone()),
@@ -205,6 +224,19 @@ async fn cmd_status(tn: &Arc<NetManager>) -> R {
     }
 }
 
+/// After Running, wait (up to 20 s) for the first network map so the peer list is complete.
+async fn wait_synced(tn: &Arc<NetManager>, mut s: NetSnapshot) -> NetSnapshot {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !s.synced && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        s = tn.refresh().await;
+    }
+    if !s.synced {
+        println!("note: no network map from NetBird after 20 s; the peer list may be incomplete");
+    }
+    s
+}
+
 async fn wait_running(tn: &Arc<NetManager>, limit: Duration) -> Result<NetSnapshot, String> {
     let mut rx = tn.subscribe();
     let deadline = Instant::now() + limit;
@@ -212,7 +244,7 @@ async fn wait_running(tn: &Arc<NetManager>, limit: Duration) -> Result<NetSnapsh
     loop {
         let s = rx.borrow_and_update().clone();
         match &s.state {
-            NetState::Running => return Ok(s),
+            NetState::Running => return Ok(wait_synced(tn, s).await),
             NetState::NeedsLogin {
                 auth_url: Some(url),
                 ..

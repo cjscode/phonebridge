@@ -24,20 +24,24 @@ Run these on the Mac, in order, and paste the output back. Each one proves a lay
 cargo run -p pb-core --example probe -- login
 ```
 
-Open the printed URL and sign in (or use `cargo run -p pb-core --example probe -- --setup-key YOUR-KEY login`; add `--management-url https://…` for a self-hosted server). Expected: `state: Running`, then a peer table that includes your phone, `connected: true` within a few seconds.
+If the probe already has a saved login, `login` just reuses it (add `--relogin` to sign in again). Otherwise, open the printed URL and sign in (or use `cargo run -p pb-core --example probe -- --setup-key YOUR-KEY login`; add `--management-url https://…` for a self-hosted server). Expected: `state: Running`, then a peer table that includes your phone, `connected: true` within a few seconds.
 
 ```bash
 cargo run -p pb-core --example probe -- peers
 ```
 
-With the phone plugged in once, run the Homebrew-free `adb tcpip` through the bundled adb:
+With the phone plugged in once, run `adb tcpip` through the bundled adb. Use a private server port (as the app does), and stop that server afterwards, so no adb server is left holding the phone's USB connection on the standard port 5037:
 
 ```bash
 cargo xtask fetch
 ```
 
 ```bash
-src-tauri/binaries/adb-aarch64-apple-darwin tcpip 5555
+ANDROID_ADB_SERVER_PORT=25037 src-tauri/binaries/adb-aarch64-apple-darwin tcpip 5555
+```
+
+```bash
+ANDROID_ADB_SERVER_PORT=25037 src-tauri/binaries/adb-aarch64-apple-darwin kill-server
 ```
 
 Then dial the phone's adb port through NetBird (use its address from the peer table):

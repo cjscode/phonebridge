@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct RawStatus {
+    /// The first network map has arrived (before that, `peers` is incomplete).
+    pub synced: bool,
     pub management_url: String,
     pub management_connected: bool,
     pub management_error: String,
@@ -120,6 +122,8 @@ impl Peer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NetSnapshot {
     pub state: NetState,
+    /// NetBird has received its first network map, so `peers` is complete.
+    pub synced: bool,
     pub self_name: Option<String>,
     pub self_ips: Vec<IpAddr>,
     /// Management server host, e.g. "api.netbird.io".
@@ -134,6 +138,7 @@ impl NetSnapshot {
     pub fn with_state(state: NetState) -> Self {
         Self {
             state,
+            synced: false,
             self_name: None,
             self_ips: vec![],
             network: None,
@@ -231,6 +236,7 @@ impl RawStatus {
         let network = url_host(&self.management_url);
         NetSnapshot {
             state: NetState::Running,
+            synced: self.synced,
             self_name: Some(self.local_fqdn.trim_end_matches('.').to_string())
                 .filter(|s| !s.is_empty()),
             self_ips: [self.local_ip.as_str(), self.local_ipv6.as_str()]
@@ -260,6 +266,7 @@ mod tests {
         let raw: RawStatus = serde_json::from_str(RUNNING).unwrap();
         let snap = raw.into_snapshot();
         assert_eq!(snap.state, NetState::Running);
+        assert!(snap.synced);
         assert_eq!(
             snap.self_name.as_deref(),
             Some("phonebridge-mac.netbird.cloud")

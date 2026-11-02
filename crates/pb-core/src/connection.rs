@@ -439,6 +439,14 @@ impl Actor {
         }
 
         match snap.peer_by_id(&phone.node_id) {
+            None if !snap.synced => {
+                // NetBird hasn't received its peer list yet; check again shortly.
+                self.set(ConnectionStatus::Connecting {
+                    attempt: self.attempt,
+                });
+                self.schedule(Duration::from_secs(1).min(self.cfg.backoff_max));
+                return;
+            }
             None => {
                 let retry = self.schedule_backoff();
                 self.set(ConnectionStatus::PhoneUnreachable {

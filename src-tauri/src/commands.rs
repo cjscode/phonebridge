@@ -140,8 +140,14 @@ fn require_net(state: &SharedState) -> Res<NetSnapshot> {
 
 #[tauri::command]
 pub async fn usb_detect(state: State<'_, SharedState>) -> Res<UsbDetect> {
-    let snap = require_net(&state)?;
+    let mut snap = require_net(&state)?;
     let phone = setup::find_usb_phone(&state.adb).await?;
+    // Right after NetBird starts, the peer list may not have arrived yet.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !snap.synced && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        snap = state.net.refresh().await;
+    }
     let suggested_peer_id = setup::match_peer(&snap, &phone.ips).map(|p| p.id);
     Ok(UsbDetect {
         phone,

@@ -15,6 +15,8 @@ const KEY: &str = "settings";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// NetBird management server (NetBird Cloud unless self-hosted).
+    pub management_url: String,
     pub phone: Option<PhoneConfig>,
     /// Loopback port of the forwarder (keeps the adb serial stable).
     pub forwarder_port: Option<u16>,
@@ -31,6 +33,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            management_url: pb_core::overlay::DEFAULT_MANAGEMENT_URL.to_string(),
             phone: None,
             forwarder_port: None,
             adb_server_port: 0,

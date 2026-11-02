@@ -100,6 +100,7 @@ main { flex: 1; overflow: auto; padding: 16px; }
 .row { display: flex; gap: 8px; align-items: center; }
 .row.wrap { flex-wrap: wrap; }
 .spacer { flex: 1; }
+.row > button { white-space: nowrap; flex-shrink: 0; }
 .steps { padding-left: 20px; }
 .steps li { margin: 6px 0; }
 

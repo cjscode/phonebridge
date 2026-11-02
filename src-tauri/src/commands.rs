@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use pb_core::connection::{ConnectionStatus, PhoneConfig};
 use pb_core::forwarder::ForwarderStats;
-use pb_core::overlay::{NetSnapshot, NetState, Peer};
+use pb_core::overlay::{NetSnapshot, NetState, Peer, SsoFlow};
 use pb_core::presets::QualityPreset;
 use pb_core::procs::WindowInfo;
 use pb_core::scrcpy::{AndroidApp, LaunchMode, WindowOptions, window_args};
@@ -26,60 +26,92 @@ fn settings_err(e: String) -> AppError {
 
 #[derive(Serialize)]
 pub struct Overview {
-    pub tailnet: NetSnapshot,
+    pub net: NetSnapshot,
     pub connection: ConnectionStatus,
     pub phone: Option<PhoneConfig>,
     pub settings: Settings,
     pub windows: Vec<WindowInfo>,
-    pub hostname: String,
+    pub device_name: String,
+    pub management_url: String,
     pub tools_error: Option<AppError>,
 }
 
 #[tauri::command]
 pub fn get_overview(state: State<'_, SharedState>) -> Overview {
     Overview {
-        tailnet: state.tailnet.snapshot(),
+        net: state.net.snapshot(),
         connection: state.conn.status(),
         phone: state.conn.phone(),
         settings: state.settings.get(),
         windows: state.procs.list(),
-        hostname: state.tailnet.hostname().to_string(),
+        device_name: state.net.device_name().to_string(),
+        management_url: state.net.management_url(),
         tools_error: state.tools_error.clone(),
     }
 }
 
-// ---- Tailnet ---------------------------------------------------------------
+// ---- NetBird ---------------------------------------------------------------
 
+pub fn open_url(app: &AppHandle, state: &SharedState, url: &str) -> Res<()> {
+    *state.opened_auth_url.lock().unwrap() = Some(url.to_string());
+    app.opener().open_url(url, None::<&str>).map_err(|e| {
+        AppError::new(ErrorCode::Io, format!("Couldn't open the browser: {e}"))
+            .hint(url.to_string())
+    })
+}
+
+/// Start a browser (SSO) login. The status pump opens the URL in the browser.
 #[tauri::command]
-pub fn tailnet_open_login(app: AppHandle, state: State<'_, SharedState>) -> Res<()> {
-    match state.tailnet.snapshot().state {
+pub async fn net_login_browser(state: State<'_, SharedState>) -> Res<SsoFlow> {
+    state.net.login_browser().await
+}
+
+/// Open the pending login page again.
+#[tauri::command]
+pub fn net_open_login(app: AppHandle, state: State<'_, SharedState>) -> Res<()> {
+    match state.net.snapshot().state {
         NetState::NeedsLogin {
             auth_url: Some(url),
-        } => {
-            *state.opened_auth_url.lock().unwrap() = Some(url.clone());
-            app.opener().open_url(&url, None::<&str>).map_err(|e| {
-                AppError::new(ErrorCode::Io, format!("Couldn't open the browser: {e}")).hint(url)
-            })
-        }
-        NetState::NeedsLogin { auth_url: None } | NetState::Starting => Err(AppError::new(
-            ErrorCode::Network,
-            "The login link isn't ready yet",
-        )
-        .hint("Wait a few seconds and try again.")),
-        _ => Err(AppError::new(ErrorCode::Network, "Already logged in")),
+            ..
+        } => open_url(&app, &state, &url),
+        _ => Err(AppError::new(ErrorCode::Network, "No login is waiting")
+            .hint("Click \"Sign in with browser\".")),
     }
 }
 
 #[tauri::command]
-pub async fn tailnet_login_with_key(state: State<'_, SharedState>, key: String) -> Res<()> {
-    state.tailnet.login_with_auth_key(key).await
+pub async fn net_login_setup_key(state: State<'_, SharedState>, key: String) -> Res<()> {
+    state.net.login_with_setup_key(key).await
 }
 
 #[tauri::command]
-pub async fn tailnet_logout(state: State<'_, SharedState>) -> Res<()> {
+pub async fn net_retry(state: State<'_, SharedState>) -> Res<()> {
+    state.net.retry().await
+}
+
+#[tauri::command]
+pub async fn net_logout(state: State<'_, SharedState>) -> Res<()> {
     state.procs.terminate_all(Duration::from_secs(2)).await;
     *state.opened_auth_url.lock().unwrap() = None;
-    state.tailnet.logout().await
+    state.net.logout().await
+}
+
+/// Use a self-hosted NetBird server (logs out if the URL changes).
+#[tauri::command]
+pub async fn net_set_management_url(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    url: String,
+) -> Res<String> {
+    state.procs.terminate_all(Duration::from_secs(2)).await;
+    state.net.set_management_url(url).await?;
+    let url = state.net.management_url();
+    let s = state
+        .settings
+        .update(|s| s.management_url = url.clone())
+        .map_err(settings_err)?;
+    let _ = app.emit("settings", &s);
+    Ok(url)
 }
 
 // ---- Phone setup -----------------------------------------------------------
@@ -87,33 +119,30 @@ pub async fn tailnet_logout(state: State<'_, SharedState>) -> Res<()> {
 #[derive(Serialize)]
 pub struct UsbDetect {
     pub phone: UsbPhone,
-    /// Tailnet peer whose IP matches the phone's tun0 address.
+    /// NetBird peer whose IP matches one of the phone's addresses.
     pub suggested_peer_id: Option<String>,
     /// Peers to choose from (Android first).
     pub peers: Vec<Peer>,
 }
 
-fn require_tailnet(state: &SharedState) -> Res<NetSnapshot> {
-    let snap = state.tailnet.snapshot();
+fn require_net(state: &SharedState) -> Res<NetSnapshot> {
+    let snap = state.net.snapshot();
     if snap.is_running() {
         Ok(snap)
     } else {
         Err(AppError::new(
             ErrorCode::NotLoggedIn,
-            "PhoneBridge isn't online on your tailnet yet",
+            "PhoneBridge isn't connected to NetBird yet",
         )
-        .hint("Log in to Tailscale first (see the banner at the top)."))
+        .hint("Log in to NetBird first."))
     }
 }
 
 #[tauri::command]
 pub async fn usb_detect(state: State<'_, SharedState>) -> Res<UsbDetect> {
-    let snap = require_tailnet(&state)?;
+    let snap = require_net(&state)?;
     let phone = setup::find_usb_phone(&state.adb).await?;
-    let suggested_peer_id = phone
-        .tailnet_ip
-        .and_then(|ip| setup::match_peer(&snap, ip))
-        .map(|p| p.id);
+    let suggested_peer_id = setup::match_peer(&snap, &phone.ips).map(|p| p.id);
     Ok(UsbDetect {
         phone,
         suggested_peer_id,
@@ -121,7 +150,7 @@ pub async fn usb_detect(state: State<'_, SharedState>) -> Res<UsbDetect> {
     })
 }
 
-/// Enable adb over TCP on the USB phone and remember the chosen tailnet peer.
+/// Enable adb over TCP on the USB phone and remember the chosen NetBird peer.
 #[tauri::command]
 pub async fn usb_setup(
     app: AppHandle,
@@ -129,18 +158,18 @@ pub async fn usb_setup(
     serial: String,
     peer_id: String,
 ) -> Res<PhoneConfig> {
-    let snap = require_tailnet(&state)?;
+    let snap = require_net(&state)?;
     let peer = snap.peer_by_id(&peer_id).cloned().ok_or_else(|| {
         AppError::new(
             ErrorCode::BadInput,
-            "That device is no longer on your tailnet",
+            "That device is no longer in your NetBird network",
         )
     })?;
     let ip = peer
         .ipv4()
         .map(std::net::IpAddr::V4)
         .or_else(|| peer.ips.first().copied())
-        .ok_or_else(|| AppError::new(ErrorCode::BadInput, "That device has no tailnet IP"))?;
+        .ok_or_else(|| AppError::new(ErrorCode::BadInput, "That device has no NetBird IP"))?;
     setup::enable_tcpip(&state.adb, &serial, 5555).await?;
     let phone = PhoneConfig {
         node_id: peer.id.clone(),
@@ -175,17 +204,16 @@ pub async fn usb_reenable(state: State<'_, SharedState>) -> Res<Reenabled> {
         .phone()
         .ok_or_else(|| AppError::new(ErrorCode::PhoneNotSetUp, "No phone is set up yet"))?;
     let usb = setup::find_usb_phone(&state.adb).await?;
-    let warning = match usb.tailnet_ip {
-        Some(ip) if std::net::IpAddr::V4(ip) != saved.ip => Some(format!(
-            "The phone on USB has tailnet IP {ip}, but the saved phone ({}) is {}. Use \"Set up via USB\" if this is a different phone.",
+    let has_saved_ip = usb
+        .ips
+        .iter()
+        .any(|ip| std::net::IpAddr::V4(*ip) == saved.ip);
+    let warning = (!has_saved_ip).then(|| {
+        format!(
+            "The phone on USB doesn't have {}'s NetBird address ({}). Either NetBird isn't connected on the phone (open the NetBird app), or this is a different phone (use \"Set up via USB\").",
             saved.name, saved.ip
-        )),
-        None => Some(
-            "Tailscale doesn't seem to be running on the phone. Open the Tailscale app on it."
-                .into(),
-        ),
-        _ => None,
-    };
+        )
+    });
     setup::enable_tcpip(&state.adb, &usb.serial, 5555).await?;
     state.conn.connect_now().await;
     Ok(Reenabled { warning })
@@ -372,8 +400,9 @@ pub struct Diagnostics {
     pub adb_server_port: u16,
     pub forwarder_port: Option<u16>,
     pub forwarder_stats: Option<ForwarderStats>,
-    pub tailnet_hostname: String,
-    pub tailnet_state_dir: String,
+    pub netbird_device_name: String,
+    pub netbird_management_url: String,
+    pub netbird_state_dir: String,
     pub data_dir: String,
     pub log_dir: String,
     /// Other adb/scrcpy installs on this Mac (informational: we never use them).
@@ -407,8 +436,9 @@ pub async fn diagnostics(state: State<'_, SharedState>) -> Res<Diagnostics> {
         adb_server_port: state.tools.adb_server_port,
         forwarder_port: state.conn.forwarder_port(),
         forwarder_stats: state.conn.forwarder_stats(),
-        tailnet_hostname: state.tailnet.hostname().to_string(),
-        tailnet_state_dir: state.tailnet.state_dir().display().to_string(),
+        netbird_device_name: state.net.device_name().to_string(),
+        netbird_management_url: state.net.management_url(),
+        netbird_state_dir: state.net.state_dir().display().to_string(),
         data_dir: state.data_dir.display().to_string(),
         log_dir: state.log_dir.display().to_string(),
         system_copies,

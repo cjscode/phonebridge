@@ -18,7 +18,7 @@ pub struct AppState {
     pub tools_error: Option<pb_core::AppError>,
     pub adb: Adb,
     pub scrcpy: Scrcpy,
-    pub tailnet: Arc<NetManager>,
+    pub net: Arc<NetManager>,
     pub conn: ConnectionHandle,
     pub procs: Arc<ProcessRegistry>,
     pub settings: SettingsStore<Wry>,

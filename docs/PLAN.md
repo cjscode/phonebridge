@@ -1,3 +1,11 @@
+> **Update (2026-11-02): migrated from Tailscale to NetBird.** The plan below was written for an embedded Tailscale node (libtailscale) and is kept for history. What changed:
+>
+> - **Embedded client:** NetBird's own Go package `github.com/netbirdio/netbird/client/embed` (v0.82.0, BSD-3), wrapped by a small Go file (`crates/netbird-sys/go/shim.go`) and built as a static C library with the same auto-downloaded Go toolchain. It runs in netstack (userspace) mode: no VPN, no system DNS or route changes, no admin rights.
+> - **Login:** `client/embed` takes a setup key, an SSO token, or a saved key, and has no built-in browser login. NetBird's login code lives in Go `internal` packages that other modules can't import, so the wrapper reimplements it with public pieces. It asks the management server for its PKCE settings (falling back to the device-code flow), opens the browser, receives the callback on localhost, and passes the token to `embed.New`. Later launches reuse the WireGuard key saved in `config.json`. Setup keys work too, and peers added that way never expire. Self-hosted servers are supported through a management URL setting.
+> - **Peers:** NetBird reports each peer's IP, FQDN, connected/relayed state and endpoints, but not its OS or a control-plane "online" flag. So the phone picker matches the phone by any of its IP addresses (read over USB), and the connection manager always tries the dial, using the peer's state only to explain failures.
+> - **Unchanged:** the forwarder, adb/scrcpy handling, the connection state machine, packaging, and the reasoning about why one forwarder carries all scrcpy traffic.
+> - **Licences:** only NetBird client code is linked. None of the AGPL server directories are, as checked with `go list -deps`. Three MPL-2.0 Go modules are used unmodified.
+
 # PhoneBridge — Phase 1 Plan (control an Android phone from a Mac over an embedded tailnet)
 
 ## Context

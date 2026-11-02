@@ -192,7 +192,7 @@ fn verify_bundle(app: Option<PathBuf>, target: &str) -> R {
         "Resources/scrcpy-icons/scrcpy.png",
         "Resources/licenses/scrcpy-LICENSE.txt",
         "Resources/licenses/platform-tools-NOTICE.txt",
-        "Resources/licenses/libtailscale-LICENSE.txt",
+        "Resources/licenses/go/MODULES.txt",
     ];
     for rel in exes.iter().chain(data.iter()) {
         let p = contents.join(rel);

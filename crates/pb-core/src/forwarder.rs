@@ -1,7 +1,7 @@
-//! Local TCP forwarder: `127.0.0.1:<port>` → (tailnet) → `<phone>:5555`.
+//! Local TCP forwarder: `127.0.0.1:<port>` → (NetBird) → `<phone>:5555`.
 //!
 //! adb can't use a userspace network, so we give it a loopback address. Every
-//! connection adb opens here gets its own tailnet dial to the phone. adb uses a
+//! connection adb opens here gets its own NetBird dial to the phone. adb uses a
 //! single TCP "transport" connection per device and multiplexes everything on
 //! it (shell, push, and scrcpy's video/audio/control streams, whether scrcpy
 //! uses `adb reverse` or `adb forward`), so in practice there is one long-lived
@@ -28,7 +28,7 @@ pub trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncStream for T {}
 pub type BoxStream = Box<dyn AsyncStream>;
 
-/// Something that can open a byte stream to an address (the tailnet, or a fake in tests).
+/// Something that can open a byte stream to an address (NetBird, or a fake in tests).
 pub trait Dialer: Send + Sync + 'static {
     fn dial(&self, addr: SocketAddr) -> BoxFuture<Result<BoxStream, DialError>>;
 }

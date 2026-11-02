@@ -8,21 +8,23 @@ cargo test --workspace
 
 This covers:
 - `fetch`: pins, SHA-256, and rejecting a wrong hash.
-- `pb-core` unit tests: tailnet status parsing, LocalAPI logout request, dial error classification, adb `devices -l` and tailnet-IP parsing, the `--list-apps` parser (fixture made with scrcpy's own formatting rules, including wrapped long names), scrcpy argument building, and process registry (stderr tail, process-group kill, crash cleanup that only kills matching executables).
+- `pb-core` unit tests: NetBird status parsing (direct / relayed / not connected peers, null lists, management warnings), login-error classification and friendly messages, NetBird manager input checks, dial error classification, adb `devices -l` and phone-IP parsing, the `--list-apps` parser (fixture made with scrcpy's own formatting rules, including wrapped long names), scrcpy argument building, and process registry (stderr tail, process-group kill, crash cleanup that only kills matching executables).
 - Forwarder: echo, byte counters, a 100 MB throughput run, refused-dial reporting, retargeting, and stopping.
-- `pb-core/tests/connection.rs`: the connection state machine against a fake `adb` and a scripted dialer. It covers connect, phone needs USB (refused), peer offline, dial timeout, tailnet drop and recovery, unauthorized then allowed, device drop mid-session, phone stops answering (reboot), user disconnect, and tailnet IP change.
+- `pb-core/tests/connection.rs`: the connection state machine against a fake `adb` and a scripted dialer. It covers connect, phone needs USB (refused), peer not connected plus dial timeout, a peer that looks idle but answers, dial timeout, NetBird drop and recovery, unauthorized then allowed, device drop mid-session, phone stops answering (reboot), user disconnect, and NetBird IP change.
+
+Checked live from the build sandbox against NetBird Cloud: `probe login` returns a real browser-login URL (PKCE), and a fake setup key is rejected by the server and reported as "log in again".
 
 ## Mac checkpoints (Phase 2)
 
-Run these on the Mac, in order, and paste the output back. Each one proves a layer before the next is added. `probe` keeps its own tailnet identity (`phonebridge-probe`, state in `target/phonebridge-cache/probe-state`), separate from the app. Remove it from the admin console when you're done.
+Run these on the Mac, in order, and paste the output back. Each one proves a layer before the next is added. `probe` keeps its own NetBird identity (`phonebridge-probe`, state in `target/phonebridge-cache/probe-state`), separate from the app. Remove it from the NetBird dashboard (Peers) when you're done.
 
-### Checkpoint 1: tailnet only
+### Checkpoint 1: NetBird only
 
 ```bash
 cargo run -p pb-core --example probe -- login
 ```
 
-Open the printed URL and approve. Expected: `state: Running`, then a peer table that includes your phone (`android`, online).
+Open the printed URL and sign in (or use `cargo run -p pb-core --example probe -- --setup-key YOUR-KEY login`; add `--management-url https://…` for a self-hosted server). Expected: `state: Running`, then a peer table that includes your phone, `connected: true` within a few seconds.
 
 ```bash
 cargo run -p pb-core --example probe -- peers
@@ -38,13 +40,13 @@ cargo xtask fetch
 src-tauri/binaries/adb-aarch64-apple-darwin tcpip 5555
 ```
 
-Then dial the phone's adb port through the tailnet (use its 100.x address from the peer table):
+Then dial the phone's adb port through NetBird (use its address from the peer table):
 
 ```bash
 cargo run -p pb-core --example probe -- dial 100.x.y.z:5555
 ```
 
-Expected: `OK: TCP connection to 100.x.y.z:5555 through the tailnet`. "connection refused" means adb tcpip isn't on; a timeout means the phone isn't reachable.
+Expected: `OK: TCP connection to 100.x.y.z:5555 through NetBird`. "connection refused" means adb tcpip isn't on; a timeout means the phone isn't reachable.
 
 ```bash
 cargo run -p pb-core --example probe -- forward 100.x.y.z
@@ -100,15 +102,17 @@ Do each step with the app connected (and one app window open where relevant). "U
 |---|---|---|
 | 1 | `pkill -f 'Contents/MacOS/adb'` (or `pkill adb` in dev) | Windows close with an error toast. UI: Reconnecting… then Connected within ~5 s (adb server restarts). |
 | 2 | Phone: airplane mode for 60 s, then off | UI: Reconnecting… then "Can't reach …: … offline/timed out. Retrying in Ns" (backoff 1 → 30 s), then Connected after it's back. |
-| 3 | Phone: disconnect Tailscale, then reconnect | UI: Phone not reachable on tailnet → Connected. |
+| 3 | Phone: switch NetBird off, then on | UI: Phone not reachable over NetBird ("isn't connected to NetBird…") → Connected. |
 | 4 | Reboot the phone | UI: "pixel restarted… plug in USB once" (port 5555 refused). Plug in → Re-enable via USB → Connected. |
-| 5 | Mac: turn Wi-Fi off for 60 s, then on | UI: Tailnet pill turns to a warning → Waiting for tailnet → Connected. |
+| 5 | Mac: turn Wi-Fi off for 60 s, then on | UI: Phone not reachable / Reconnecting (the NetBird pill shows a management warning on hover) → Connected. |
 | 6 | Sleep the Mac 5 min, wake | Reconnects by itself (liveness check within ~15 s). |
 | 7 | Open 3 app windows, then Quit from the menu bar | All windows close. `pgrep -fl PhoneBridge.app` prints nothing. `ps aux \| grep [a]db` shows no PhoneBridge adb. |
 | 8 | Open 2 windows, then `kill -9` the PhoneBridge process | Windows may stay open. Relaunch PhoneBridge: the log says "cleaned up 2 scrcpy process(es)" and they're gone. |
-| 9 | Settings → Log out of Tailscale | Windows close. Login view returns with a new link. The device disappears from the admin console after logout. |
+| 9 | Settings → Log out of NetBird | Windows close. The login view returns. The peer is logged out in the NetBird dashboard; delete it there if it was added with a setup key. |
 | 10 | Click the same app twice | Toast: "X is already open in a window". |
 | 11 | Unplug and replug USB during "Set up via USB" | Clear error toast ("No phone found on USB" / "hasn't allowed this Mac yet") with a hint. |
+| 12 | Settings → Log out, then "Sign in with browser" and close the browser tab without logging in | Login view stays on "Waiting for NetBird login…"; after ~5 minutes it shows "login cancelled or timed out" with a Sign in button. |
+| 13 | Log in with a setup key that was revoked | Login view: "NetBird rejected the setup key (wrong, used up, revoked or expired)." |
 
 ## Packaging checks (Phase 3)
 
@@ -140,10 +144,10 @@ cargo xtask dist
    ```
 
    (Undo with `brew link scrcpy` and `brew link android-platform-tools`.)
-2. Quit the Tailscale Mac app if it's installed (menu bar → Quit), and check it's gone:
+2. Quit the NetBird Mac app if it's installed (menu bar → Quit, and `netbird down` if you use the CLI), and check it's gone:
 
    ```bash
-   pgrep -fl Tailscale
+   pgrep -fl -i netbird
    ```
 
 3. Launch `/Applications/PhoneBridge.app` (from Finder, not a terminal).
@@ -161,4 +165,4 @@ cargo xtask dist
    ```
 
    Expected: only 127.0.0.1 connections.
-6. In the Tailscale admin console, `phonebridge-mac` is its own device and is online, with no Tailscale app running.
+6. In the NetBird dashboard, `phonebridge-mac` is its own peer and is connected, with no NetBird app running on the Mac.

@@ -7,17 +7,21 @@ import { showToast } from "./toast.js";
 import { linkText, phoneName, state } from "../store.js";
 
 export function renderPills() {
-  const t = document.getElementById("tailnet-pill");
+  const t = document.getElementById("net-pill");
   const c = document.getElementById("conn-pill");
   if (!t || !c) return;
-  const kind = state.tailnet?.state.kind ?? "starting";
+  const kind = state.net?.state.kind ?? "starting";
   const [tCls, tText] = {
-    running: ["ok", "Tailnet online"],
-    needs_login: ["warn", "Tailscale: logged out"],
-    needs_machine_auth: ["warn", "Tailscale: awaiting approval"],
-    error: ["err", "Tailnet error"],
-    stopped: ["err", "Tailnet stopped"],
-  }[kind] ?? ["", "Tailnet starting…"];
+    running: ["ok", "NetBird online"],
+    needs_login: ["warn", "NetBird: logged out"],
+    error: ["err", "NetBird offline"],
+    stopped: ["err", "NetBird stopped"],
+  }[kind] ?? ["", "NetBird starting…"];
+  if (kind === "running" && state.net?.health.length) {
+    t.title = state.net.health.join("\n");
+  } else {
+    t.title = "";
+  }
   t.className = `pill ${tCls}`;
   t.textContent = tText;
 
@@ -28,7 +32,7 @@ export function renderPills() {
     reconnecting: ["warn", "Reconnecting…"],
     phone_needs_usb: ["warn", "Needs USB"],
     phone_unreachable: ["warn", "Phone unreachable"],
-    tailnet_offline: ["warn", "Waiting for tailnet"],
+    net_offline: ["warn", "Waiting for NetBird"],
     unauthorized: ["warn", "Allow on phone"],
     disconnected: ["", "Disconnected"],
   }[s.kind] ?? ["", "No phone"];
@@ -57,7 +61,7 @@ export function renderBanner() {
   const retry = s.retry_in_secs ? ` Retrying in ${s.retry_in_secs}s.` : "";
   /** @type {[string, any, HTMLElement[]] | null} */
   let b = null;
-  if (state.tailnet?.state.kind !== "running" || state.forceSetup) {
+  if (state.net?.state.kind !== "running" || state.forceSetup) {
     b = null; // login / setup views explain themselves
   } else
     switch (s.kind) {
@@ -80,8 +84,8 @@ export function renderBanner() {
       case "phone_unreachable":
         b = ["warn", `Can't reach ${name}: ${s.detail ?? ""}.${retry}`, [action("Retry now", "connect_now")]];
         break;
-      case "tailnet_offline":
-        b = ["warn", `Waiting for the tailnet: ${s.detail ?? ""}`, []];
+      case "net_offline":
+        b = ["warn", `Waiting for NetBird: ${s.detail ?? ""}`, []];
         break;
       case "unauthorized":
         b = ["warn", `Unlock ${name} and tap "Allow" on the "Allow USB debugging?" prompt.`, []];

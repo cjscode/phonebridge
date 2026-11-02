@@ -2,5 +2,5 @@
 xtask = "run --quiet -p xtask --"
 
 [env]
-# Matches bundle.macOS.minimumSystemVersion and the libtailscale (Go 1.27) build.
+# Matches bundle.macOS.minimumSystemVersion and the NetBird client (Go 1.27) build.
 MACOSX_DEPLOYMENT_TARGET = "13.0"

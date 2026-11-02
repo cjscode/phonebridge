@@ -1,6 +1,6 @@
 [package]
 name = "phonebridge"
-description = "Control your Android phone from your Mac over your tailnet"
+description = "Control your Android phone from your Mac over NetBird"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

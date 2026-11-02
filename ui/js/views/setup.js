@@ -1,5 +1,5 @@
 // @ts-check
-// "Set up via USB": detect phone → pick tailnet peer → enable adb over TCP.
+// "Set up via USB": detect phone → pick its NetBird peer → enable adb over TCP.
 
 import { call } from "../api.js";
 import { busy, h, replace } from "../dom.js";
@@ -28,7 +28,7 @@ export function mount(root) {
       null,
       h("li", null, "On the phone: Settings → About phone → tap ", h("strong", null, "Build number"), " 7 times to enable Developer options."),
       h("li", null, "Settings → System → Developer options → turn on ", h("strong", null, "USB debugging"), "."),
-      h("li", null, "Make sure the ", h("strong", null, "Tailscale"), " app on the phone is connected."),
+      h("li", null, "Make sure the ", h("strong", null, "NetBird"), " app on the phone is connected to the same network."),
       h("li", null, "Plug the phone into this Mac with a data cable, unlock it, and tap ", h("strong", null, "Allow"), " if asked."),
     );
 
@@ -39,10 +39,10 @@ export function mount(root) {
       const peers = detected.peers;
       pick = [
         h("h2", null, `Found ${p.model || "a phone"}${p.android_version ? ` (Android ${p.android_version})` : ""}`),
-        p.tailnet_ip
-          ? h("p.muted", null, `Its tailnet address is ${p.tailnet_ip}.`)
-          : h("p", null, "Tailscale doesn't seem to be running on the phone. Open the Tailscale app on it, then detect again, or pick it below."),
-        h("p", null, "Which tailnet device is this phone?"),
+        detected.suggested_peer_id
+          ? h("p.muted", null, "Found it in your NetBird network (matched by IP address).")
+          : h("p", null, "Couldn't match it to a NetBird device by IP. Is the NetBird app on the phone connected? Detect again, or pick it below."),
+        h("p", null, "Which NetBird device is this phone?"),
         peers.length
           ? h(
               "ul.peer-list",
@@ -52,13 +52,13 @@ export function mount(root) {
                   "li",
                   { class: peer.id === selected ? "selected" : "", onclick: () => ((selected = peer.id), render()) },
                   h("input", { type: "radio", name: "peer", checked: peer.id === selected }),
-                  h("div.spacer", null, h("div", null, peer.dns_name.split(".")[0] || peer.hostname), h("div.small.muted", null, `${peer.os} · ${peer.ips[0] ?? ""}`)),
+                  h("div.spacer", null, h("div", null, peer.dns_name.split(".")[0] || peer.hostname), h("div.small.muted", null, `${peer.ips[0] ?? ""}${peer.online ? " · connected" : ""}`)),
                   peer.id === detected?.suggested_peer_id ? h("span.tag.match", null, "this phone") : null,
-                  h("span.tag", null, peer.online ? "online" : "offline"),
+
                 ),
               ),
             )
-          : h("p.muted", null, "No other devices on your tailnet yet."),
+          : h("p.muted", null, "No other devices in your NetBird network yet (or access policies hide them)."),
         h("div.row", null, h("div.spacer"), enableButton(p.serial)),
       ];
     }
@@ -69,7 +69,7 @@ export function mount(root) {
         "div.card",
         null,
         h("div.row", null, h("h1.spacer", null, "Set up via USB"), state.settings?.phone ? h("button", { onclick: () => set({ forceSetup: false }) }, "Cancel") : null),
-        h("p.muted", null, "One time only: PhoneBridge turns on wireless debugging over your tailnet, so the phone works from anywhere, even on cellular."),
+        h("p.muted", null, "One time only: PhoneBridge turns on wireless debugging over NetBird, so the phone works from anywhere, even on cellular."),
         steps,
         h("div.row", null, detectBtn),
         pick,

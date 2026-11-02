@@ -1,5 +1,5 @@
 // @ts-check
-// Settings dialog: tailnet, phone, window options, diagnostics.
+// Settings dialog: NetBird, phone, window options, diagnostics.
 
 import { call } from "../api.js";
 import { busy, h, replace } from "../dom.js";
@@ -25,7 +25,7 @@ export function openSettings() {
   replace(dlg, h("div.dialog-head", null, h("strong.spacer", null, "Settings"), h("button", { onclick: () => dlg.close() }, "Done")), body);
 
   const render = () => {
-    const t = state.tailnet;
+    const t = state.net;
     const s = state.settings;
     const phone = s?.phone;
     const peer = phone ? t?.peers.find((p) => p.id === phone.node_id) : null;
@@ -49,21 +49,21 @@ export function openSettings() {
 
     replace(
       body,
-      h("h2", null, "Tailscale"),
+      h("h2", null, "NetBird"),
       kv([
-        ["This device", t?.self_name ?? state.hostname],
+        ["This device", t?.self_name ?? state.deviceName],
         ["Addresses", t?.self_ips.join(", ")],
-        ["Tailnet", t?.tailnet],
+        ["Server", state.managementUrl],
         ["State", t?.state.kind],
       ]),
       t?.health.length ? h("p.small.muted", null, t.health.join(" · ")) : null,
       h(
         "div.row",
         null,
-        btn("Log out of Tailscale", async () => {
-          if (!confirm("Log PhoneBridge out of your tailnet? Open windows will close.")) return;
-          await call("tailnet_logout");
-          showToast("Logged out. A new login link will open.");
+        btn("Log out of NetBird", async () => {
+          if (!confirm("Log PhoneBridge out of NetBird? Open windows will close, and this Mac leaves your NetBird network.")) return;
+          await call("net_logout");
+          showToast("Logged out of NetBird.");
           dlg.close();
         }, "danger"),
       ),
@@ -73,9 +73,9 @@ export function openSettings() {
         ? [
             kv([
               ["Name", phone.name],
-              ["Tailnet IP", phone.ip],
+              ["NetBird IP", phone.ip],
               ["Status", state.connection.kind.replaceAll("_", " ")],
-              ["Path", peer ? (linkText(peer.link) || (peer.online ? "idle" : "offline")) : "not on tailnet"],
+              ["Path", peer ? (linkText(peer.link) || "not connected") + (peer.latency_ms ? ` · ${peer.latency_ms} ms` : "") : "not in your NetBird network"],
             ]),
             h(
               "div.row.wrap",
@@ -128,7 +128,7 @@ export function openSettings() {
               ? `${fmtBytes(d.forwarder_stats.bytes_down)} down / ${fmtBytes(d.forwarder_stats.bytes_up)} up, ${d.forwarder_stats.total_connections} connection(s)`
               : "—",
           ],
-          ["Tailnet state", h("code", null, d.tailnet_state_dir)],
+          ["NetBird identity", h("code", null, d.netbird_state_dir)],
           ["Logs", h("code", null, d.log_dir)],
           ["Other installs", d.system_copies.length ? d.system_copies.join(", ") + " (not used)" : "none found"],
         ]),

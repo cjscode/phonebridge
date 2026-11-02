@@ -120,12 +120,22 @@ fn copy_notices(workspace: &Path, licenses: &Path, go_licenses: Option<&Path>) -
     if notices.is_file() {
         install_file(&notices, &licenses.join("THIRD_PARTY_NOTICES.md"), false)?;
     }
+    // Left by builds from before the switch to NetBird.
+    let _ = fs::remove_file(licenses.join("libtailscale-LICENSE.txt"));
     if let Some(go) = go_licenses.filter(|p| p.is_dir()) {
         let dest = licenses.join("go");
         fs::create_dir_all(&dest)?;
+        let mut wanted = std::collections::HashSet::new();
         for entry in fs::read_dir(go)?.flatten() {
             if entry.path().is_file() {
                 install_file(&entry.path(), &dest.join(entry.file_name()), false)?;
+                wanted.insert(entry.file_name());
+            }
+        }
+        // Keep the folder an exact copy: drop licences of modules no longer linked.
+        for entry in fs::read_dir(&dest)?.flatten() {
+            if !wanted.contains(&entry.file_name()) {
+                let _ = fs::remove_file(entry.path());
             }
         }
     }

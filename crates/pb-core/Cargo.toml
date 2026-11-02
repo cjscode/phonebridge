@@ -1,6 +1,6 @@
 [package]
 name = "pb-core"
-description = "PhoneBridge core: embedded tailnet node, adb-over-tailnet forwarder, adb/scrcpy control, connection manager"
+description = "PhoneBridge core: embedded NetBird peer, adb-over-NetBird forwarder, adb/scrcpy control, connection manager"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

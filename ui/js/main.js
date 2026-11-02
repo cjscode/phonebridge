@@ -15,7 +15,7 @@ import * as setup from "./views/setup.js";
 let current = null;
 
 function pickView() {
-  if (state.tailnet?.state.kind !== "running") return "login";
+  if (state.net?.state.kind !== "running") return "login";
   if (!state.settings?.phone || state.forceSetup) return "setup";
   return "home";
 }
@@ -43,20 +43,21 @@ async function init() {
 
   // Subscribe first so no event is missed between the overview and listening.
   await Promise.all([
-    on("tailnet", (tailnet) => set({ tailnet })),
+    on("net", (net) => set({ net })),
     on("connection", (connection) => set({ connection })),
-    on("settings", (settings) => set({ settings })),
+    on("settings", (settings) => set({ settings, managementUrl: settings.management_url })),
     on("windows", (windows) => set({ windows })),
     on("app-error", (e) => showError(e)),
   ]);
 
   const o = await call("get_overview");
   set({
-    tailnet: o.tailnet,
+    net: o.net,
     connection: o.connection,
     settings: o.settings,
     windows: o.windows,
-    hostname: o.hostname,
+    deviceName: o.device_name,
+    managementUrl: o.management_url,
     toolsError: o.tools_error,
   });
 }

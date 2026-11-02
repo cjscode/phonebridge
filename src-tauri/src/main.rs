@@ -33,7 +33,7 @@ pub fn report_error(app: &AppHandle, e: AppError) {
 fn init_logging(log_dir: &Path) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_subscriber::prelude::*;
     let filter = tracing_subscriber::EnvFilter::try_from_env("PHONEBRIDGE_LOG")
-        .unwrap_or_else(|_| "info,tsnet=info,scrcpy=info,tao=warn,wry=warn".into());
+        .unwrap_or_else(|_| "info,netbird=info,scrcpy=info,tao=warn,wry=warn".into());
     let stderr = tracing_subscriber::fmt::layer()
         .with_target(false)
         .with_writer(std::io::stderr);
@@ -125,15 +125,19 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let adb = Adb::new(tools.clone());
     let scrcpy = Scrcpy::new(tools.clone());
-    let tailnet = NetManager::new(data_dir.join("tailscale"), pb_core::DEFAULT_HOSTNAME);
+    let net = NetManager::new(
+        data_dir.join("netbird"),
+        pb_core::DEFAULT_HOSTNAME,
+        s.management_url.clone(),
+    );
     let procs = ProcessRegistry::new(Some(pid_file), &tools.scrcpy);
 
     // Tauri's async runtime is Tokio; spawn the connection actor on it.
     let conn = tauri::async_runtime::block_on(async {
         connection::spawn(
             adb.clone(),
-            tailnet.dialer(),
-            tailnet.subscribe(),
+            net.dialer(),
+            net.subscribe(),
             ConnectionConfig {
                 forwarder_port: s.forwarder_port,
                 ..Default::default()
@@ -147,7 +151,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         tools_error: tools_error.clone(),
         adb,
         scrcpy,
-        tailnet: tailnet.clone(),
+        net: net.clone(),
         conn,
         procs,
         settings,
@@ -161,12 +165,19 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     tray::create(&handle)?;
     spawn_pumps(&handle, &state);
 
-    // Start our adb server fresh (a crashed run may have left one), then the tailnet.
+    // Start our adb server fresh (a crashed run may have left one), then NetBird.
+    // First run (no saved login): start a browser login right away; the pump
+    // below opens it.
     let st = state.clone();
     let h = handle.clone();
     tauri::async_runtime::spawn(async move {
         let _ = st.adb.kill_server().await;
-        if let Err(e) = st.tailnet.start().await {
+        if let Err(e) = st.net.start().await {
+            report_error(&h, e);
+        }
+        if !st.net.has_saved_login()
+            && let Err(e) = st.net.login_browser().await
+        {
             report_error(&h, e);
         }
     });
@@ -190,21 +201,22 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Forward core state changes to the UI and the tray.
 fn spawn_pumps(app: &AppHandle, state: &SharedState) {
-    // Tailnet status.
+    // NetBird status.
     let (h, st) = (app.clone(), state.clone());
     tauri::async_runtime::spawn(async move {
-        let mut rx = st.tailnet.subscribe();
+        let mut rx = st.net.subscribe();
         loop {
             let snap = rx.borrow_and_update().clone();
-            // First run: open the login page automatically (once per URL).
+            // A browser login started: open it (once per URL).
             if let NetState::NeedsLogin {
                 auth_url: Some(url),
+                ..
             } = &snap.state
             {
                 let mut opened = st.opened_auth_url.lock().unwrap();
                 if opened.as_deref() != Some(url.as_str()) {
                     *opened = Some(url.clone());
-                    tracing::info!("opening Tailscale login page");
+                    tracing::info!("opening NetBird login page");
                     if let Err(e) = h.opener().open_url(url, None::<&str>) {
                         report_error(
                             &h,
@@ -214,7 +226,7 @@ fn spawn_pumps(app: &AppHandle, state: &SharedState) {
                     }
                 }
             }
-            let _ = h.emit("tailnet", &snap);
+            let _ = h.emit("net", &snap);
             if rx.changed().await.is_err() {
                 return;
             }
@@ -324,12 +336,12 @@ pub fn quit(app: &AppHandle) {
     });
 }
 
-/// Close windows, disconnect adb, stop our adb server and forwarder, then the tailnet node.
+/// Close windows, disconnect adb, stop our adb server and forwarder, then NetBird.
 async fn shutdown(state: SharedState) {
     tracing::info!("shutting down");
     state.procs.terminate_all(Duration::from_secs(2)).await;
     state.conn.shutdown().await;
-    state.tailnet.shutdown().await;
+    state.net.shutdown().await;
     tracing::info!("shutdown complete");
 }
 
@@ -343,9 +355,12 @@ fn main() {
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
             commands::get_overview,
-            commands::tailnet_open_login,
-            commands::tailnet_login_with_key,
-            commands::tailnet_logout,
+            commands::net_login_browser,
+            commands::net_open_login,
+            commands::net_login_setup_key,
+            commands::net_retry,
+            commands::net_logout,
+            commands::net_set_management_url,
             commands::usb_detect,
             commands::usb_setup,
             commands::usb_reenable,

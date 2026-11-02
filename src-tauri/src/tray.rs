@@ -119,7 +119,7 @@ fn on_menu(app: &AppHandle, id: &str) {
             Ok(())
         }
         "quit" => {
-            app.exit(0);
+            crate::quit(app);
             Ok(())
         }
         "reconnect" => {

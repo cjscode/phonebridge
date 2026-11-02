@@ -307,6 +307,23 @@ fn spawn_pumps(app: &AppHandle, state: &SharedState) {
     });
 }
 
+/// Clean up, then exit. Used by the tray's Quit so cleanup never depends on
+/// whether a programmatic exit can be intercepted in `RunEvent::ExitRequested`.
+pub fn quit(app: &AppHandle) {
+    let Some(state) = app.try_state::<SharedState>().map(|s| s.inner().clone()) else {
+        app.exit(0);
+        return;
+    };
+    if state.shutting_down.swap(true, Ordering::AcqRel) {
+        return; // already shutting down
+    }
+    let h = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = tokio::time::timeout(Duration::from_secs(12), shutdown(state)).await;
+        h.exit(0);
+    });
+}
+
 /// Close windows, disconnect adb, stop our adb server and forwarder, then the tailnet node.
 async fn shutdown(state: SharedState) {
     tracing::info!("shutting down");

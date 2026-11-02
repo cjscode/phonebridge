@@ -18,7 +18,7 @@ fn main() {
         && manifest.join(format!("binaries/adb-{target}")).is_file()
         && manifest.join(format!("binaries/scrcpy-{target}")).is_file();
     if !skip {
-        let go_licenses = env::var_os("DEP_TAILSCALE_LICENSES").map(PathBuf::from);
+        let go_licenses = env::var_os("DEP_NETBIRD_LICENSES").map(PathBuf::from);
         let result = fetch::workspace_root(&manifest)
             .and_then(|ws| fetch::bundle::place(&ws, &manifest, &target, go_licenses.as_deref()));
         if let Err(e) = result {

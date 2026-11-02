@@ -16,8 +16,8 @@ fetch.workspace = true
 tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
-# Direct dependency so build.rs receives DEP_TAILSCALE_LICENSES (and runs after it).
-libtailscale-sys.workspace = true
+# Direct dependency so build.rs receives DEP_NETBIRD_LICENSES (and runs after it).
+netbird-sys.workspace = true
 pb-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

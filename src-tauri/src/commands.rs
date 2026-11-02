@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use pb_core::connection::{ConnectionStatus, PhoneConfig};
 use pb_core::forwarder::ForwarderStats;
+use pb_core::overlay::{NetSnapshot, NetState, Peer};
 use pb_core::presets::QualityPreset;
 use pb_core::procs::WindowInfo;
 use pb_core::scrcpy::{AndroidApp, LaunchMode, WindowOptions, window_args};
 use pb_core::setup::{self, UsbPhone};
-use pb_core::tailnet::{Peer, TailnetSnapshot, TailnetState};
 use pb_core::{AppError, ErrorCode};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -26,7 +26,7 @@ fn settings_err(e: String) -> AppError {
 
 #[derive(Serialize)]
 pub struct Overview {
-    pub tailnet: TailnetSnapshot,
+    pub tailnet: NetSnapshot,
     pub connection: ConnectionStatus,
     pub phone: Option<PhoneConfig>,
     pub settings: Settings,
@@ -53,7 +53,7 @@ pub fn get_overview(state: State<'_, SharedState>) -> Overview {
 #[tauri::command]
 pub fn tailnet_open_login(app: AppHandle, state: State<'_, SharedState>) -> Res<()> {
     match state.tailnet.snapshot().state {
-        TailnetState::NeedsLogin {
+        NetState::NeedsLogin {
             auth_url: Some(url),
         } => {
             *state.opened_auth_url.lock().unwrap() = Some(url.clone());
@@ -61,12 +61,12 @@ pub fn tailnet_open_login(app: AppHandle, state: State<'_, SharedState>) -> Res<
                 AppError::new(ErrorCode::Io, format!("Couldn't open the browser: {e}")).hint(url)
             })
         }
-        TailnetState::NeedsLogin { auth_url: None } | TailnetState::Starting => Err(AppError::new(
-            ErrorCode::Tailnet,
+        NetState::NeedsLogin { auth_url: None } | NetState::Starting => Err(AppError::new(
+            ErrorCode::Network,
             "The login link isn't ready yet",
         )
         .hint("Wait a few seconds and try again.")),
-        _ => Err(AppError::new(ErrorCode::Tailnet, "Already logged in")),
+        _ => Err(AppError::new(ErrorCode::Network, "Already logged in")),
     }
 }
 
@@ -93,7 +93,7 @@ pub struct UsbDetect {
     pub peers: Vec<Peer>,
 }
 
-fn require_tailnet(state: &SharedState) -> Res<TailnetSnapshot> {
+fn require_tailnet(state: &SharedState) -> Res<NetSnapshot> {
     let snap = state.tailnet.snapshot();
     if snap.is_running() {
         Ok(snap)

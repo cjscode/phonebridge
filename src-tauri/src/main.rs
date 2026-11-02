@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use pb_core::adb::Adb;
 use pb_core::connection::{self, ConnectionConfig};
+use pb_core::overlay::{NetManager, NetState};
 use pb_core::procs::{self, ProcEvent, ProcessRegistry};
 use pb_core::scrcpy::Scrcpy;
-use pb_core::tailnet::{TailnetManager, TailnetState};
 use pb_core::tools::BundledTools;
 use pb_core::{AppError, ErrorCode};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
@@ -125,7 +125,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let adb = Adb::new(tools.clone());
     let scrcpy = Scrcpy::new(tools.clone());
-    let tailnet = TailnetManager::new(data_dir.join("tailscale"), pb_core::DEFAULT_HOSTNAME);
+    let tailnet = NetManager::new(data_dir.join("tailscale"), pb_core::DEFAULT_HOSTNAME);
     let procs = ProcessRegistry::new(Some(pid_file), &tools.scrcpy);
 
     // Tauri's async runtime is Tokio; spawn the connection actor on it.
@@ -197,7 +197,7 @@ fn spawn_pumps(app: &AppHandle, state: &SharedState) {
         loop {
             let snap = rx.borrow_and_update().clone();
             // First run: open the login page automatically (once per URL).
-            if let TailnetState::NeedsLogin {
+            if let NetState::NeedsLogin {
                 auth_url: Some(url),
             } = &snap.state
             {

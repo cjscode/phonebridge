@@ -5,7 +5,7 @@
 //! (always present on macOS, honours proxies and the system trust store),
 //! verifies the hash in Rust, and unpacks with the system `tar` / `unzip`.
 //!
-//! It is used by `libtailscale-sys/build.rs`, `src-tauri/build.rs` and `xtask`.
+//! It is used by `netbird-sys/build.rs`, `src-tauri/build.rs` and `xtask`.
 
 pub mod bundle;
 
@@ -71,9 +71,9 @@ pub struct Go {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Libtailscale {
+pub struct Netbird {
     pub repo: String,
-    pub commit: String,
+    pub version: String,
 }
 
 /// Parsed `deps.toml`.
@@ -83,7 +83,7 @@ pub struct Pins {
     #[serde(rename = "platform-tools")]
     pub platform_tools: PlatformTools,
     pub go: Go,
-    pub libtailscale: Libtailscale,
+    pub netbird: Netbird,
 }
 
 impl Pins {
@@ -302,7 +302,7 @@ mod tests {
         {
             assert_eq!(a.sha256.len(), 64);
         }
-        assert_eq!(pins.libtailscale.commit.len(), 40);
+        assert!(pins.netbird.version.starts_with('v'));
     }
 
     #[test]

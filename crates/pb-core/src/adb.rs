@@ -99,14 +99,26 @@ pub fn parse_devices(text: &str) -> Vec<Device> {
     out
 }
 
-/// Pick the phone's tailnet address (100.64.0.0/10) from `ip -4 -o addr` output.
-pub fn parse_tailnet_ipv4(text: &str) -> Option<Ipv4Addr> {
-    text.split_whitespace()
-        .filter_map(|tok| tok.split('/').next()?.parse::<Ipv4Addr>().ok())
-        .find(|ip| {
-            let o = ip.octets();
-            o[0] == 100 && (o[1] & 0xC0) == 64
-        })
+/// All non-loopback IPv4 addresses in `ip -4 -o addr` output. The NetBird
+/// address is matched against the peer list (self-hosted networks may use any
+/// range, so we don't guess by prefix).
+pub fn parse_ipv4s(text: &str) -> Vec<Ipv4Addr> {
+    let mut ips = Vec::new();
+    for line in text.lines() {
+        let mut toks = line.split_whitespace();
+        while let Some(tok) = toks.next() {
+            if tok == "inet"
+                && let Some(ip) = toks
+                    .next()
+                    .and_then(|a| a.split('/').next()?.parse::<Ipv4Addr>().ok())
+                && !ip.is_loopback()
+                && !ips.contains(&ip)
+            {
+                ips.push(ip);
+            }
+        }
+    }
+    ips
 }
 
 #[derive(Debug, Clone)]
@@ -283,12 +295,12 @@ impl Adb {
         }
     }
 
-    /// The phone's Tailscale IPv4 (from its tun interface), read over USB.
-    pub async fn tailnet_ipv4(&self, serial: &str) -> Result<Option<Ipv4Addr>, AppError> {
+    /// The phone's IPv4 addresses (including its NetBird one), read over USB.
+    pub async fn ipv4_addrs(&self, serial: &str) -> Result<Vec<Ipv4Addr>, AppError> {
         let out = self
             .shell(serial, "ip -4 -o addr show", Duration::from_secs(10))
             .await?;
-        Ok(parse_tailnet_ipv4(&out))
+        Ok(parse_ipv4s(&out))
     }
 
     pub async fn getprop(&self, serial: &str, prop: &str) -> Result<String, AppError> {
@@ -328,20 +340,19 @@ mod tests {
     }
 
     #[test]
-    fn finds_tailnet_ip() {
+    fn lists_phone_ips() {
         let text = "1: lo    inet 127.0.0.1/8 scope host lo\n\
             30: wlan0    inet 192.168.1.20/24 brd 192.168.1.255 scope global wlan0\n\
             41: rmnet_data2    inet 10.161.4.5/30 scope global rmnet_data2\n\
-            52: tun0    inet 100.101.102.103/32 scope global tun0\n";
+            52: tun0    inet 100.92.33.7/16 scope global tun0\n";
         assert_eq!(
-            parse_tailnet_ipv4(text),
-            Some(Ipv4Addr::new(100, 101, 102, 103))
+            parse_ipv4s(text),
+            vec![
+                Ipv4Addr::new(192, 168, 1, 20),
+                Ipv4Addr::new(10, 161, 4, 5),
+                Ipv4Addr::new(100, 92, 33, 7)
+            ]
         );
-        // 100.0.0.0/8 outside the CGNAT range is not a tailnet address.
-        assert_eq!(parse_tailnet_ipv4("inet 100.200.1.1/32"), None);
-        assert_eq!(
-            parse_tailnet_ipv4("inet 100.127.255.1/32"),
-            Some(Ipv4Addr::new(100, 127, 255, 1))
-        );
+        assert!(parse_ipv4s("garbage").is_empty());
     }
 }

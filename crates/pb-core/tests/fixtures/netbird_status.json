@@ -1,0 +1,57 @@
+{
+  "management_url": "https://api.netbird.io:443",
+  "management_connected": true,
+  "management_error": "",
+  "signal_connected": true,
+  "local_ip": "100.92.10.1/16",
+  "local_ipv6": "",
+  "local_fqdn": "phonebridge-mac.netbird.cloud",
+  "local_pub_key": "SELFkey=",
+  "peers": [
+    {
+      "pub_key": "LAPTOPkey=",
+      "ip": "100.92.5.5",
+      "ipv6": "",
+      "fqdn": "old-laptop.netbird.cloud",
+      "conn_status": "Connecting",
+      "relayed": false,
+      "local_endpoint": "",
+      "remote_endpoint": "",
+      "relay_address": "",
+      "latency_ms": 0,
+      "last_handshake_unix": 0,
+      "bytes_rx": 0,
+      "bytes_tx": 0
+    },
+    {
+      "pub_key": "NASkey=",
+      "ip": "100.92.1.2",
+      "ipv6": "",
+      "fqdn": "nas.netbird.cloud",
+      "conn_status": "Connected",
+      "relayed": true,
+      "local_endpoint": "",
+      "remote_endpoint": "",
+      "relay_address": "rels://streamline-de-fra1-0.relay.netbird.io:443",
+      "latency_ms": 80,
+      "last_handshake_unix": 1793650000,
+      "bytes_rx": 100,
+      "bytes_tx": 100
+    },
+    {
+      "pub_key": "PHONEkey=",
+      "ip": "100.92.33.7",
+      "ipv6": "",
+      "fqdn": "pixel-9.netbird.cloud",
+      "conn_status": "Connected",
+      "relayed": false,
+      "local_endpoint": "192.168.1.10:51820",
+      "remote_endpoint": "203.0.113.7:51820",
+      "relay_address": "rels://streamline-de-fra1-0.relay.netbird.io:443",
+      "latency_ms": 42,
+      "last_handshake_unix": 1793650100,
+      "bytes_rx": 4096,
+      "bytes_tx": 2048
+    }
+  ]
+}

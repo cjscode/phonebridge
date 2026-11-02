@@ -1,7 +1,7 @@
-//! Keeps the saved phone connected: tailnet → forwarder → `adb connect`, with
+//! Keeps the saved phone connected: NetBird → forwarder → `adb connect`, with
 //! liveness checks, reconnect-with-backoff, and a status the UI can explain.
 //!
-//! Everything runs in one task (an actor), driven by: user commands, tailnet
+//! Everything runs in one task (an actor), driven by: user commands, NetBird
 //! snapshot changes, forwarder events, a keepalive tick, and a retry timer.
 
 use std::net::{IpAddr, SocketAddr};
@@ -14,15 +14,15 @@ use tokio::time::Instant;
 
 use crate::adb::{Adb, DeviceState};
 use crate::forwarder::{Dialer, Forwarder, ForwarderEvent, ForwarderStats, bind_loopback};
-use crate::tailnet::{DialError, PeerLink, TailnetSnapshot, TailnetState};
+use crate::overlay::{DialError, NetSnapshot, NetState, PeerLink};
 
 /// The phone we remember between launches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhoneConfig {
-    /// Stable tailnet node ID (survives IP changes).
+    /// Stable NetBird peer ID (its WireGuard public key).
     pub node_id: String,
     pub name: String,
-    /// Last known tailnet IP; refreshed from the tailnet when it changes.
+    /// Last known NetBird IP; refreshed from NetBird when it changes.
     pub ip: IpAddr,
 }
 
@@ -31,8 +31,8 @@ pub struct PhoneConfig {
 pub enum ConnectionStatus {
     /// Nothing set up yet; run "Set up via USB".
     NoPhone,
-    /// Our tailnet node isn't online (logged out, starting, Mac offline).
-    TailnetOffline {
+    /// Our NetBird client isn't running (logged out, starting, Mac offline).
+    NetOffline {
         detail: String,
     },
     Connecting {
@@ -53,7 +53,7 @@ pub enum ConnectionStatus {
     PhoneNeedsUsb {
         retry_in_secs: u64,
     },
-    /// The phone can't be reached on the tailnet (offline, asleep, Tailscale off).
+    /// The phone can't be reached over NetBird (offline, asleep, NetBird off).
     PhoneUnreachable {
         detail: String,
         retry_in_secs: u64,
@@ -73,20 +73,20 @@ impl ConnectionStatus {
     pub fn summary(&self) -> String {
         match self {
             Self::NoPhone => "No phone set up".into(),
-            Self::TailnetOffline { .. } => "Tailnet offline".into(),
+            Self::NetOffline { .. } => "NetBird offline".into(),
             Self::Connecting { .. } => "Connecting…".into(),
             Self::Connected {
                 link: Some(PeerLink::Direct { .. }),
                 ..
             } => "Connected (direct)".into(),
             Self::Connected {
-                link: Some(PeerLink::Derp { region }),
+                link: Some(PeerLink::Relayed { .. }),
                 ..
-            } => format!("Connected (relayed via {region})"),
+            } => "Connected (relayed)".into(),
             Self::Connected { .. } => "Connected".into(),
             Self::Reconnecting { .. } => "Reconnecting…".into(),
             Self::PhoneNeedsUsb { .. } => "Phone rebooted: plug in USB once".into(),
-            Self::PhoneUnreachable { .. } => "Phone not reachable on tailnet".into(),
+            Self::PhoneUnreachable { .. } => "Phone not reachable over NetBird".into(),
             Self::Unauthorized => "Allow USB debugging on the phone".into(),
             Self::Disconnected => "Disconnected".into(),
         }
@@ -214,7 +214,7 @@ impl ConnectionHandle {
 struct Actor {
     adb: Adb,
     dialer: Arc<dyn Dialer>,
-    tailnet: watch::Receiver<TailnetSnapshot>,
+    net: watch::Receiver<NetSnapshot>,
     cfg: ConnectionConfig,
     status: watch::Sender<ConnectionStatus>,
     shared: Arc<Shared>,
@@ -232,7 +232,7 @@ struct Actor {
 pub fn spawn(
     adb: Adb,
     dialer: Arc<dyn Dialer>,
-    tailnet: watch::Receiver<TailnetSnapshot>,
+    net: watch::Receiver<NetSnapshot>,
     cfg: ConnectionConfig,
     phone: Option<PhoneConfig>,
 ) -> ConnectionHandle {
@@ -250,7 +250,7 @@ pub fn spawn(
     let actor = Actor {
         adb,
         dialer,
-        tailnet,
+        net,
         cfg,
         status: status_tx,
         shared: shared.clone(),
@@ -282,9 +282,9 @@ impl Actor {
                     Some(Cmd::Shutdown(done)) => { self.teardown().await; let _ = done.send(()); return; }
                     Some(c) => self.handle_cmd(c).await,
                 },
-                changed = self.tailnet.changed() => {
+                changed = self.net.changed() => {
                     if changed.is_err() { self.teardown().await; return; }
-                    self.on_tailnet_change().await;
+                    self.on_net_change().await;
                 }
                 _ = sleep_until_opt(retry_at) => {
                     self.next_try = None;
@@ -368,27 +368,27 @@ impl Actor {
         }
     }
 
-    async fn on_tailnet_change(&mut self) {
-        let snap = self.tailnet.borrow_and_update().clone();
+    async fn on_net_change(&mut self) {
+        let snap = self.net.borrow_and_update().clone();
         if !snap.is_running() {
             if self.serial.is_some() {
                 self.drop_device().await;
             }
             if self.want_connected && self.phone.is_some() {
-                self.next_try = None; // wait for the tailnet to come back
-                self.set(ConnectionStatus::TailnetOffline {
-                    detail: tailnet_detail(&snap.state),
+                self.next_try = None; // wait for the NetBird to come back
+                self.set(ConnectionStatus::NetOffline {
+                    detail: net_detail(&snap.state),
                 });
             }
             return;
         }
-        // Tailnet is up: if we were waiting on it, try now.
+        // NetBird is up: if we were waiting on it, try now.
         if self.want_connected
             && self.phone.is_some()
             && self.serial.is_none()
             && (matches!(
                 *self.status.borrow(),
-                ConnectionStatus::TailnetOffline { .. } | ConnectionStatus::Connecting { .. }
+                ConnectionStatus::NetOffline { .. } | ConnectionStatus::Connecting { .. }
             ) || self.next_try.is_none())
         {
             self.attempt = 0;
@@ -430,19 +430,19 @@ impl Actor {
             self.set(ConnectionStatus::NoPhone);
             return;
         };
-        let snap = self.tailnet.borrow().clone();
+        let snap = self.net.borrow().clone();
         if !snap.is_running() {
-            self.set(ConnectionStatus::TailnetOffline {
-                detail: tailnet_detail(&snap.state),
+            self.set(ConnectionStatus::NetOffline {
+                detail: net_detail(&snap.state),
             });
-            return; // on_tailnet_change will retry
+            return; // on_net_change will retry
         }
 
         match snap.peer_by_id(&phone.node_id) {
             None => {
                 let retry = self.schedule_backoff();
                 self.set(ConnectionStatus::PhoneUnreachable {
-                    detail: format!("{} isn't on your tailnet any more", phone.name),
+                    detail: format!("{} isn't in your NetBird network any more (removed, or blocked by an access policy)", phone.name),
                     retry_in_secs: retry,
                 });
                 return;
@@ -454,24 +454,26 @@ impl Actor {
                     .or_else(|| peer.ips.first().copied())
                     && ip != phone.ip
                 {
-                    tracing::info!("phone tailnet IP changed {} -> {ip}", phone.ip);
+                    tracing::info!("phone NetBird IP changed {} -> {ip}", phone.ip);
                     phone.ip = ip;
                     self.phone = Some(phone.clone());
                     *self.shared.phone.lock().unwrap() = Some(phone.clone());
                 }
-                if !peer.online {
-                    let retry = self.schedule_backoff();
-                    self.set(ConnectionStatus::PhoneUnreachable {
-                        detail: format!(
-                            "{} is offline on your tailnet (Tailscale off, no signal, or asleep)",
-                            phone.name
-                        ),
-                        retry_in_secs: retry,
-                    });
-                    return;
-                }
             }
         }
+        // NetBird has no "peer online" flag, so always try; the peer's
+        // connection state only helps explain a failure.
+        let peer_connected = snap.peer_by_id(&phone.node_id).is_some_and(|p| p.online);
+        let unreachable_detail = |e: &str| {
+            if peer_connected {
+                format!("{}: {e}", phone.name)
+            } else {
+                format!(
+                    "{} isn't connected to NetBird ({e}). Is NetBird on the phone switched on and does the phone have signal?",
+                    phone.name
+                )
+            }
+        };
 
         self.set(ConnectionStatus::Connecting {
             attempt: self.attempt,
@@ -492,7 +494,7 @@ impl Actor {
             Ok(Err(e)) => {
                 let retry = self.schedule_backoff();
                 self.set(ConnectionStatus::PhoneUnreachable {
-                    detail: format!("{target}: {e}"),
+                    detail: unreachable_detail(&e.to_string()),
                     retry_in_secs: retry,
                 });
                 return;
@@ -500,7 +502,7 @@ impl Actor {
             Err(_) => {
                 let retry = self.schedule_backoff();
                 self.set(ConnectionStatus::PhoneUnreachable {
-                    detail: format!("{target}: timed out"),
+                    detail: unreachable_detail("timed out"),
                     retry_in_secs: retry,
                 });
                 return;
@@ -632,16 +634,13 @@ impl Actor {
     }
 }
 
-fn tailnet_detail(state: &TailnetState) -> String {
+fn net_detail(state: &NetState) -> String {
     match state {
-        TailnetState::Starting => "Tailnet starting…".into(),
-        TailnetState::NeedsLogin { .. } => "Log in to Tailscale".into(),
-        TailnetState::NeedsMachineAuth => {
-            "This Mac is waiting for approval in the Tailscale admin console".into()
-        }
-        TailnetState::Running => "Online".into(),
-        TailnetState::Stopped => "Tailnet stopped".into(),
-        TailnetState::Error { message } => format!("Tailnet error: {message}"),
+        NetState::Starting => "NetBird starting…".into(),
+        NetState::NeedsLogin { .. } => "Log in to NetBird".into(),
+        NetState::Running => "Online".into(),
+        NetState::Stopped => "NetBird stopped".into(),
+        NetState::Error { message, .. } => format!("NetBird error: {message}"),
     }
 }
 

@@ -1,7 +1,8 @@
 //! Milestone CLI: proves each layer on its own, outside the app.
 //!
+//!   cargo run -p pb-core --example probe -- login                  (browser login)
+//!   cargo run -p pb-core --example probe -- --setup-key KEY login  (or a setup key)
 //!   cargo run -p pb-core --example probe -- status
-//!   cargo run -p pb-core --example probe -- login
 //!   cargo run -p pb-core --example probe -- peers
 //!   cargo run -p pb-core --example probe -- dial 100.x.y.z:5555
 //!   cargo run -p pb-core --example probe -- forward 100.x.y.z
@@ -9,8 +10,9 @@
 //!   cargo run -p pb-core --example probe -- scrcpy 100.x.y.z [--force-adb-forward]
 //!
 //! Options (before the command): --state DIR (default: a "probe-state" folder
-//! in the build cache, separate from the app's), --hostname NAME
-//! (default phonebridge-probe), --auth-key tskey-...
+//! in the build cache, separate from the app's), --name NAME (NetBird device
+//! name, default phonebridge-probe), --setup-key KEY, --management-url URL
+//! (default NetBird Cloud). `login` saves the identity; later commands reuse it.
 //!
 //! adb-test / scrcpy use the binaries placed by `cargo xtask fetch`.
 
@@ -22,13 +24,13 @@ use std::time::{Duration, Instant};
 
 use pb_core::adb::Adb;
 use pb_core::forwarder::{Dialer, Forwarder, bind_loopback};
-use pb_core::tailnet::{TailnetManager, TailnetSnapshot, TailnetState};
+use pb_core::overlay::{DEFAULT_MANAGEMENT_URL, NetManager, NetSnapshot, NetState};
 use pb_core::tools::BundledTools;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: probe [--state DIR] [--hostname NAME] [--auth-key KEY] \
-         <status|login|peers|dial IP:PORT|forward IP|adb-test IP|scrcpy IP [--force-adb-forward]>"
+        "usage: probe [--state DIR] [--name NAME] [--setup-key KEY] [--management-url URL] \
+         <login|status|peers|dial IP:PORT|forward IP|adb-test IP|scrcpy IP [--force-adb-forward]>"
     );
     ExitCode::from(2)
 }
@@ -55,7 +57,7 @@ async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,tsnet=warn".into()),
+                .unwrap_or_else(|_| "info,netbird=warn".into()),
         )
         .with_target(false)
         .init();
@@ -69,8 +71,9 @@ async fn main() -> ExitCode {
     let state = opt("--state")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace().join("target/phonebridge-cache/probe-state"));
-    let hostname = opt("--hostname").unwrap_or_else(|| "phonebridge-probe".into());
-    let auth_key = opt("--auth-key");
+    let name = opt("--name").unwrap_or_else(|| "phonebridge-probe".into());
+    let setup_key = opt("--setup-key");
+    let mgmt = opt("--management-url").unwrap_or_else(|| DEFAULT_MANAGEMENT_URL.into());
     let force_forward = if let Some(i) = args.iter().position(|a| a == "--force-adb-forward") {
         args.remove(i);
         true
@@ -82,14 +85,26 @@ async fn main() -> ExitCode {
     };
     let arg = args.get(1).cloned();
 
-    println!("tailnet state dir: {}", state.display());
-    let tn = TailnetManager::new(&state, &hostname);
-    let started = match auth_key {
-        Some(k) => tn.login_with_auth_key(k).await,
-        None => tn.start().await,
+    println!(
+        "NetBird state dir: {}\nmanagement server: {mgmt}",
+        state.display()
+    );
+    let tn = NetManager::new(&state, &name, &mgmt);
+    let started = if cmd == "login" {
+        match setup_key {
+            Some(k) => tn.login_with_setup_key(k).await,
+            None => tn.login_browser().await.map(|flow| {
+                println!("Open this URL to log in to NetBird:\n  {}", flow.url);
+                if let Some(code) = &flow.user_code {
+                    println!("and enter the code: {code}");
+                }
+            }),
+        }
+    } else {
+        tn.start().await
     };
     if let Err(e) = started {
-        eprintln!("failed to start tailnet node: {e}");
+        eprintln!("failed to start NetBird: {e}");
         return ExitCode::FAILURE;
     }
 
@@ -131,27 +146,23 @@ async fn main() -> ExitCode {
 
 type R = Result<(), String>;
 
-fn print_snapshot(s: &TailnetSnapshot) {
+fn print_snapshot(s: &NetSnapshot) {
     println!("state: {:?}", s.state);
     if let Some(n) = &s.self_name {
         println!("this node: {n} {:?}", s.self_ips);
     }
-    if let Some(t) = &s.tailnet {
-        println!("tailnet: {t}");
+    if let Some(t) = &s.network {
+        println!("management: {t}");
     }
     for h in &s.health {
         println!("health: {h}");
     }
     if !s.peers.is_empty() {
-        println!(
-            "\n{:<28} {:<9} {:<8} {:<17} link",
-            "peer", "os", "online", "ipv4"
-        );
+        println!("\n{:<28} {:<10} {:<17} link", "peer", "connected", "ipv4");
         for p in &s.peers {
             println!(
-                "{:<28} {:<9} {:<8} {:<17} {:?}",
+                "{:<28} {:<10} {:<17} {:?}",
                 p.display_name(),
-                p.os,
                 p.online,
                 p.ipv4().map(|i| i.to_string()).unwrap_or_default(),
                 p.link
@@ -161,23 +172,27 @@ fn print_snapshot(s: &TailnetSnapshot) {
 }
 
 /// Start the node and report the first meaningful state (login URL or running).
-async fn cmd_status(tn: &Arc<TailnetManager>) -> R {
+async fn cmd_status(tn: &Arc<NetManager>) -> R {
     let mut rx = tn.subscribe();
     let deadline = Instant::now() + Duration::from_secs(45);
     loop {
         let s = rx.borrow_and_update().clone();
         match &s.state {
-            TailnetState::NeedsLogin {
-                auth_url: Some(url),
-            } => {
-                println!("NeedsLogin. Open this URL to add the node to your tailnet:\n  {url}");
+            NetState::NeedsLogin { reason, .. } => {
+                println!(
+                    "Not logged in{}. Run `probe login` (browser) or `probe --setup-key KEY login`.",
+                    reason
+                        .as_deref()
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default()
+                );
                 return Ok(());
             }
-            TailnetState::Running => {
+            NetState::Running => {
                 print_snapshot(&s);
                 return Ok(());
             }
-            TailnetState::Error { message } => return Err(message.clone()),
+            NetState::Error { message, .. } => return Err(message.clone()),
             _ => {}
         }
         if Instant::now() > deadline {
@@ -190,31 +205,39 @@ async fn cmd_status(tn: &Arc<TailnetManager>) -> R {
     }
 }
 
-async fn wait_running(
-    tn: &Arc<TailnetManager>,
-    limit: Duration,
-) -> Result<TailnetSnapshot, String> {
+async fn wait_running(tn: &Arc<NetManager>, limit: Duration) -> Result<NetSnapshot, String> {
     let mut rx = tn.subscribe();
     let deadline = Instant::now() + limit;
     let mut shown_url = None::<String>;
     loop {
         let s = rx.borrow_and_update().clone();
         match &s.state {
-            TailnetState::Running => return Ok(s),
-            TailnetState::NeedsLogin {
+            NetState::Running => return Ok(s),
+            NetState::NeedsLogin {
                 auth_url: Some(url),
+                ..
             } if shown_url.as_deref() != Some(url) => {
-                println!("Waiting for Tailscale login… open:\n  {url}");
+                println!("Waiting for NetBird login… open:\n  {url}");
                 shown_url = Some(url.clone());
             }
-            TailnetState::NeedsMachineAuth => {
-                println!("Waiting for an admin to approve this node…")
+            NetState::NeedsLogin {
+                auth_url: None,
+                reason,
+                ..
+            } => {
+                return Err(format!(
+                    "not logged in to NetBird{}; run `probe login` first",
+                    reason
+                        .as_deref()
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default()
+                ));
             }
             _ => {}
         }
         if Instant::now() > deadline {
             return Err(format!(
-                "tailnet not running after {}s (state {:?})",
+                "NetBird not running after {}s (state {:?})",
                 limit.as_secs(),
                 s.state
             ));
@@ -223,21 +246,21 @@ async fn wait_running(
     }
 }
 
-async fn cmd_dial(tn: &Arc<TailnetManager>, addr: SocketAddr) -> R {
+async fn cmd_dial(tn: &Arc<NetManager>, addr: SocketAddr) -> R {
     wait_running(tn, Duration::from_secs(60)).await?;
     let dialer = tn.dialer();
     let t = Instant::now();
     match dialer.dial(addr).await {
         Ok(_stream) => {
             println!(
-                "OK: TCP connection to {addr} through the tailnet in {:?}",
+                "OK: TCP connection to {addr} through NetBird in {:?}",
                 t.elapsed()
             );
             Ok(())
         }
         Err(e) => Err(format!(
             "dial {addr}: {e}{}",
-            if e == pb_core::tailnet::DialError::Refused {
+            if e == pb_core::overlay::DialError::Refused {
                 "  (phone reachable, but adb isn't listening: run `adb tcpip 5555` over USB first)"
             } else {
                 ""
@@ -246,7 +269,7 @@ async fn cmd_dial(tn: &Arc<TailnetManager>, addr: SocketAddr) -> R {
     }
 }
 
-async fn start_forwarder(tn: &Arc<TailnetManager>, ip: IpAddr) -> Result<Arc<Forwarder>, String> {
+async fn start_forwarder(tn: &Arc<NetManager>, ip: IpAddr) -> Result<Arc<Forwarder>, String> {
     wait_running(tn, Duration::from_secs(60)).await?;
     let listener = bind_loopback(None).await.map_err(|e| e.to_string())?;
     let fwd = Forwarder::start(listener, SocketAddr::new(ip, 5555), tn.dialer())
@@ -259,7 +282,7 @@ async fn start_forwarder(tn: &Arc<TailnetManager>, ip: IpAddr) -> Result<Arc<For
     Ok(fwd)
 }
 
-async fn cmd_forward(tn: &Arc<TailnetManager>, ip: IpAddr) -> R {
+async fn cmd_forward(tn: &Arc<NetManager>, ip: IpAddr) -> R {
     let fwd = start_forwarder(tn, ip).await?;
     println!("Ctrl-C to stop. Try:  adb connect {}", fwd.adb_serial());
     let mut tick = tokio::time::interval(Duration::from_secs(5));
@@ -304,7 +327,7 @@ async fn adb_connect(adb: &Adb, serial: &str) -> R {
     Err("device never became ready".into())
 }
 
-async fn cmd_adb_test(tn: &Arc<TailnetManager>, ip: IpAddr) -> R {
+async fn cmd_adb_test(tn: &Arc<NetManager>, ip: IpAddr) -> R {
     let tools = tools()?;
     let adb = Adb::new(tools);
     let fwd = start_forwarder(tn, ip).await?;
@@ -380,7 +403,7 @@ async fn cmd_adb_test(tn: &Arc<TailnetManager>, ip: IpAddr) -> R {
     res
 }
 
-async fn cmd_scrcpy(tn: &Arc<TailnetManager>, ip: IpAddr, force_forward: bool) -> R {
+async fn cmd_scrcpy(tn: &Arc<NetManager>, ip: IpAddr, force_forward: bool) -> R {
     let tools = tools()?;
     let adb = Adb::new(tools.clone());
     let fwd = start_forwarder(tn, ip).await?;

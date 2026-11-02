@@ -11,7 +11,7 @@ use pb_core::connection::{
     self, ConnectionConfig, ConnectionHandle, ConnectionStatus, PhoneConfig,
 };
 use pb_core::forwarder::{BoxFuture, BoxStream, Dialer};
-use pb_core::tailnet::{DialError, Peer, PeerLink, TailnetSnapshot, TailnetState};
+use pb_core::overlay::{DialError, NetSnapshot, NetState, Peer, PeerLink};
 use pb_core::tools::BundledTools;
 use tokio::sync::watch;
 
@@ -102,23 +102,32 @@ async fn sink_server() -> SocketAddr {
     a
 }
 
-fn snapshot(running: bool, phone_online: bool) -> TailnetSnapshot {
-    let mut s = TailnetSnapshot::with_state(if running {
-        TailnetState::Running
+fn snapshot(running: bool, phone_online: bool) -> NetSnapshot {
+    let mut s = NetSnapshot::with_state(if running {
+        NetState::Running
     } else {
-        TailnetState::NeedsLogin { auth_url: None }
+        NetState::NeedsLogin {
+            auth_url: None,
+            user_code: None,
+            reason: None,
+        }
     });
     if running {
         s.peers.push(Peer {
             id: PHONE_ID.into(),
             hostname: "Pixel-9".into(),
-            dns_name: "pixel-9.example.ts.net".into(),
-            os: "android".into(),
+            dns_name: "pixel-9.netbird.cloud".into(),
+            os: String::new(),
             ips: vec!["100.101.102.103".parse().unwrap()],
             online: phone_online,
-            link: PeerLink::Direct {
-                addr: "203.0.113.7:41641".into(),
+            link: if phone_online {
+                PeerLink::Direct {
+                    addr: "203.0.113.7:51820".into(),
+                }
+            } else {
+                PeerLink::Idle
             },
+            latency_ms: None,
         });
     }
     s
@@ -128,7 +137,7 @@ struct Rig {
     _dir: tempfile::TempDir,
     dir: PathBuf,
     dialer: Arc<ScriptedDialer>,
-    tailnet: watch::Sender<TailnetSnapshot>,
+    net: watch::Sender<NetSnapshot>,
     handle: ConnectionHandle,
 }
 
@@ -163,7 +172,7 @@ impl Rig {
             _dir: tmp,
             dir,
             dialer,
-            tailnet: tx,
+            net: tx,
             handle,
         }
     }
@@ -251,16 +260,27 @@ async fn refused_means_phone_needs_usb() {
 
 #[tokio::test]
 async fn offline_peer_is_unreachable_then_recovers() {
-    let rig = Rig::new(true, false, DialMode::Ok, true).await;
+    // Not connected in NetBird and the dial times out: explain it's the phone's NetBird.
+    let rig = Rig::new(true, false, DialMode::Timeout, true).await;
     let s = rig
         .wait_for("unreachable", |s| {
             matches!(s, ConnectionStatus::PhoneUnreachable { .. })
         })
         .await;
     if let ConnectionStatus::PhoneUnreachable { detail, .. } = s {
-        assert!(detail.contains("offline"), "{detail}");
+        assert!(detail.contains("isn't connected to NetBird"), "{detail}");
     }
-    rig.tailnet.send_replace(snapshot(true, true));
+    rig.set_dial(DialMode::Ok);
+    rig.net.send_replace(snapshot(true, true));
+    rig.wait_for("connected", ConnectionStatus::is_connected)
+        .await;
+    rig.handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn idle_peer_is_still_tried() {
+    // NetBird has no online flag: a peer that isn't connected yet may still answer.
+    let rig = Rig::new(true, false, DialMode::Ok, true).await;
     rig.wait_for("connected", ConnectionStatus::is_connected)
         .await;
     rig.handle.shutdown().await;
@@ -277,23 +297,23 @@ async fn dial_timeout_is_unreachable() {
 }
 
 #[tokio::test]
-async fn waits_for_tailnet_then_connects() {
+async fn waits_for_netbird_then_connects() {
     let rig = Rig::new(false, true, DialMode::Ok, true).await;
-    rig.wait_for("tailnet offline", |s| {
-        matches!(s, ConnectionStatus::TailnetOffline { .. })
+    rig.wait_for("NetBird offline", |s| {
+        matches!(s, ConnectionStatus::NetOffline { .. })
     })
     .await;
-    rig.tailnet.send_replace(snapshot(true, true));
+    rig.net.send_replace(snapshot(true, true));
     rig.wait_for("connected", ConnectionStatus::is_connected)
         .await;
-    // Tailnet drops mid-session.
-    rig.tailnet.send_replace(snapshot(false, true));
-    rig.wait_for("tailnet offline again", |s| {
-        matches!(s, ConnectionStatus::TailnetOffline { .. })
+    // NetBird drops mid-session.
+    rig.net.send_replace(snapshot(false, true));
+    rig.wait_for("NetBird offline again", |s| {
+        matches!(s, ConnectionStatus::NetOffline { .. })
     })
     .await;
     assert_eq!(rig.handle.serial(), None);
-    rig.tailnet.send_replace(snapshot(true, true));
+    rig.net.send_replace(snapshot(true, true));
     rig.wait_for("reconnected", ConnectionStatus::is_connected)
         .await;
     rig.handle.shutdown().await;
@@ -366,7 +386,7 @@ async fn ip_change_is_followed() {
     rig.handle.disconnect().await;
     rig.wait_for("disconnected", |s| *s == ConnectionStatus::Disconnected)
         .await;
-    rig.tailnet.send_replace(snap);
+    rig.net.send_replace(snap);
     rig.handle.connect_now().await;
     rig.wait_for("connected", ConnectionStatus::is_connected)
         .await;

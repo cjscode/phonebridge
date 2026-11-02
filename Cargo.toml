@@ -2,14 +2,14 @@
 resolver = "3"
 members = [
     "crates/fetch",
-    "crates/libtailscale-sys",
+    "crates/netbird-sys",
     "crates/pb-core",
     "src-tauri",
     "xtask",
 ]
 # `cargo build` / `cargo test` at the root skip the Tauri app so the core can be
 # built and tested on machines without a webview toolchain.
-default-members = ["crates/fetch", "crates/libtailscale-sys", "crates/pb-core", "xtask"]
+default-members = ["crates/fetch", "crates/netbird-sys", "crates/pb-core", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,7 +20,7 @@ publish = false
 
 [workspace.dependencies]
 fetch = { path = "crates/fetch" }
-libtailscale-sys = { path = "crates/libtailscale-sys" }
+netbird-sys = { path = "crates/netbird-sys" }
 pb-core = { path = "crates/pb-core" }
 
 anyhow = "1"

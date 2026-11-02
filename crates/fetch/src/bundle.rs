@@ -120,11 +120,6 @@ fn copy_notices(workspace: &Path, licenses: &Path, go_licenses: Option<&Path>) -
     if notices.is_file() {
         install_file(&notices, &licenses.join("THIRD_PARTY_NOTICES.md"), false)?;
     }
-    install_file(
-        &workspace.join("crates/libtailscale-sys/vendor/libtailscale/LICENSE"),
-        &licenses.join("libtailscale-LICENSE.txt"),
-        false,
-    )?;
     if let Some(go) = go_licenses.filter(|p| p.is_dir()) {
         let dest = licenses.join("go");
         fs::create_dir_all(&dest)?;

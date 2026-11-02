@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 
 use pb_core::adb::Adb;
 use pb_core::connection::ConnectionHandle;
+use pb_core::overlay::NetManager;
 use pb_core::procs::ProcessRegistry;
 use pb_core::scrcpy::Scrcpy;
-use pb_core::tailnet::TailnetManager;
 use pb_core::tools::BundledTools;
 use tauri::Wry;
 
@@ -18,7 +18,7 @@ pub struct AppState {
     pub tools_error: Option<pb_core::AppError>,
     pub adb: Adb,
     pub scrcpy: Scrcpy,
-    pub tailnet: Arc<TailnetManager>,
+    pub tailnet: Arc<NetManager>,
     pub conn: ConnectionHandle,
     pub procs: Arc<ProcessRegistry>,
     pub settings: SettingsStore<Wry>,

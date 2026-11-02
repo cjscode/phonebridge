@@ -57,7 +57,12 @@ impl Default for WindowOptions {
 }
 
 /// Arguments for one scrcpy window (excluding the binary).
-pub fn window_args(serial: &str, preset: QualityPreset, mode: &LaunchMode, opts: &WindowOptions) -> Vec<String> {
+pub fn window_args(
+    serial: &str,
+    preset: QualityPreset,
+    mode: &LaunchMode,
+    opts: &WindowOptions,
+) -> Vec<String> {
     let p = preset.params();
     let mut a = vec![format!("--serial={serial}")];
     a.push(format!("--video-bit-rate={}", p.video_bit_rate));
@@ -121,14 +126,23 @@ pub fn parse_list_apps(text: &str) -> Vec<AndroidApp> {
             match rest.rfind("  ") {
                 Some(idx) if is_package(rest[idx..].trim()) => {
                     let name = rest[..idx].trim().to_string();
-                    apps.push(AndroidApp { name, package: rest[idx..].trim().to_string(), system });
+                    apps.push(AndroidApp {
+                        name,
+                        package: rest[idx..].trim().to_string(),
+                        system,
+                    });
                 }
                 _ => pending = Some((rest.trim().to_string(), system)),
             }
-        } else if let Some((name, system)) = pending.take() {
-            if line.starts_with("    ") && is_package(trimmed) {
-                apps.push(AndroidApp { name, package: trimmed.to_string(), system });
-            }
+        } else if let Some((name, system)) = pending.take()
+            && line.starts_with("    ")
+            && is_package(trimmed)
+        {
+            apps.push(AndroidApp {
+                name,
+                package: trimmed.to_string(),
+                system,
+            });
         }
     }
     apps
@@ -137,7 +151,8 @@ pub fn parse_list_apps(text: &str) -> Vec<AndroidApp> {
 fn is_package(s: &str) -> bool {
     !s.is_empty()
         && s.contains('.')
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
         && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
 }
 
@@ -166,8 +181,17 @@ impl Scrcpy {
             .kill_on_drop(true)
             .output()
             .await
-            .map_err(|e| AppError::new(ErrorCode::MissingBinary, format!("could not run bundled scrcpy: {e}")))?;
-        Ok(String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").to_string())
+            .map_err(|e| {
+                AppError::new(
+                    ErrorCode::MissingBinary,
+                    format!("could not run bundled scrcpy: {e}"),
+                )
+            })?;
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string())
     }
 
     /// Launchable apps on the phone (pushes scrcpy-server, ~0.7 MB, each call).
@@ -179,7 +203,12 @@ impl Scrcpy {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| AppError::new(ErrorCode::MissingBinary, format!("could not run bundled scrcpy: {e}")))?;
+            .map_err(|e| {
+                AppError::new(
+                    ErrorCode::MissingBinary,
+                    format!("could not run bundled scrcpy: {e}"),
+                )
+            })?;
         let out = tokio::time::timeout(Duration::from_secs(90), child.wait_with_output())
             .await
             .map_err(|_| AppError::new(ErrorCode::Scrcpy, "Listing apps timed out"))?
@@ -188,9 +217,19 @@ impl Scrcpy {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let apps = parse_list_apps(&format!("{stdout}\n{stderr}"));
         if !out.status.success() || apps.is_empty() {
-            let tail: Vec<&str> = stderr.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
-            return Err(AppError::new(ErrorCode::Scrcpy, format!("Couldn't list apps: {}", tail.join(" ").trim()))
-                .hint("Check that the phone is connected and unlocked."));
+            let tail: Vec<&str> = stderr
+                .lines()
+                .rev()
+                .take(6)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            return Err(AppError::new(
+                ErrorCode::Scrcpy,
+                format!("Couldn't list apps: {}", tail.join(" ").trim()),
+            )
+            .hint("Check that the phone is connected and unlocked."));
         }
         Ok(apps)
     }
@@ -216,13 +255,24 @@ mod tests {
         assert_eq!(find("org.mozilla.firefox").unwrap().name, "Firefox");
         assert_eq!(find("com.whatsapp").unwrap().name, "WhatsApp  Beta");
         // 29-char name: padding is exactly one space plus the separator.
-        assert_eq!(find("com.example.edge").unwrap().name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabc");
+        assert_eq!(
+            find("com.example.edge").unwrap().name,
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabc"
+        );
     }
 
     #[test]
     fn app_window_args() {
-        let mode = LaunchMode::App { package: "com.google.android.apps.messaging".into(), name: "Messages".into() };
-        let a = window_args("127.0.0.1:41234", QualityPreset::Cellular, &mode, &WindowOptions::default());
+        let mode = LaunchMode::App {
+            package: "com.google.android.apps.messaging".into(),
+            name: "Messages".into(),
+        };
+        let a = window_args(
+            "127.0.0.1:41234",
+            QualityPreset::Cellular,
+            &mode,
+            &WindowOptions::default(),
+        );
         assert!(a.contains(&"--serial=127.0.0.1:41234".to_string()));
         assert!(a.contains(&"--new-display=720x1280/320".to_string()));
         assert!(a.contains(&"--start-app=com.google.android.apps.messaging".to_string()));
@@ -231,13 +281,22 @@ mod tests {
         assert!(a.contains(&"--max-size=1024".to_string()));
         assert!(a.contains(&"--no-audio".to_string()));
         assert!(a.contains(&"--keep-active".to_string()));
-        assert!(!a.iter().any(|x| x.starts_with("--tcpip")), "never let scrcpy dial the phone itself");
+        assert!(
+            !a.iter().any(|x| x.starts_with("--tcpip")),
+            "never let scrcpy dial the phone itself"
+        );
     }
 
     #[test]
     fn flex_display_drops_max_size() {
-        let mode = LaunchMode::App { package: "a.b".into(), name: "B".into() };
-        let opts = WindowOptions { flex_display: true, ..Default::default() };
+        let mode = LaunchMode::App {
+            package: "a.b".into(),
+            name: "B".into(),
+        };
+        let opts = WindowOptions {
+            flex_display: true,
+            ..Default::default()
+        };
         let a = window_args("s", QualityPreset::Wifi, &mode, &opts);
         assert!(a.contains(&"--flex-display".to_string()));
         assert!(!a.iter().any(|x| x.starts_with("--max-size")));
@@ -245,7 +304,12 @@ mod tests {
 
     #[test]
     fn mirror_args() {
-        let a = window_args("s", QualityPreset::Wifi, &LaunchMode::Mirror, &WindowOptions::default());
+        let a = window_args(
+            "s",
+            QualityPreset::Wifi,
+            &LaunchMode::Mirror,
+            &WindowOptions::default(),
+        );
         assert!(a.contains(&"--max-size=1920".to_string()));
         assert!(a.contains(&"--video-bit-rate=8M".to_string()));
         assert!(a.contains(&"--max-fps=60".to_string()));

@@ -57,7 +57,11 @@ pub fn parse_devices(text: &str) -> Vec<Device> {
     let mut out = Vec::new();
     for line in text.lines() {
         let line = line.trim_end();
-        if line.is_empty() || line.starts_with("List of devices") || line.starts_with('*') || line.starts_with("adb ") {
+        if line.is_empty()
+            || line.starts_with("List of devices")
+            || line.starts_with('*')
+            || line.starts_with("adb ")
+        {
             continue;
         }
         let mut parts = line.split_whitespace();
@@ -72,14 +76,22 @@ pub fn parse_devices(text: &str) -> Vec<Device> {
             }
         };
         let field = |k: &str| {
-            rest.iter().find_map(|p| p.strip_prefix(k).and_then(|v| v.strip_prefix(':'))).map(str::to_string)
+            rest.iter()
+                .find_map(|p| p.strip_prefix(k).and_then(|v| v.strip_prefix(':')))
+                .map(str::to_string)
         };
         let is_usb = field("usb").is_some()
-            || !(serial.contains(':') || serial.starts_with("emulator-") || serial.contains("._adb-tls-"));
+            || !(serial.contains(':')
+                || serial.starts_with("emulator-")
+                || serial.contains("._adb-tls-"));
         out.push(Device {
             serial: serial.to_string(),
             state,
-            transport: if is_usb { Transport::Usb } else { Transport::Tcp },
+            transport: if is_usb {
+                Transport::Usb
+            } else {
+                Transport::Tcp
+            },
             model: field("model"),
             product: field("product"),
         });
@@ -136,11 +148,26 @@ impl Adb {
         let mut cmd = self.command();
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
         let child = cmd.spawn().map_err(|e| {
-            AppError::new(ErrorCode::MissingBinary, format!("could not run bundled adb ({}): {e}", self.tools.adb.display()))
+            AppError::new(
+                ErrorCode::MissingBinary,
+                format!(
+                    "could not run bundled adb ({}): {e}",
+                    self.tools.adb.display()
+                ),
+            )
         })?;
         let out = tokio::time::timeout(timeout, child.wait_with_output())
             .await
-            .map_err(|_| AppError::new(ErrorCode::Adb, format!("`adb {}` timed out after {}s", args.join(" "), timeout.as_secs())))?
+            .map_err(|_| {
+                AppError::new(
+                    ErrorCode::Adb,
+                    format!(
+                        "`adb {}` timed out after {}s",
+                        args.join(" "),
+                        timeout.as_secs()
+                    ),
+                )
+            })?
             .map_err(AppError::from)?;
         Ok(AdbOutput {
             success: out.status.success(),
@@ -154,17 +181,24 @@ impl Adb {
         if out.success {
             Ok(out.stdout)
         } else {
-            Err(AppError::new(ErrorCode::Adb, format!("`adb {}` failed: {}", args.join(" "), out.text())))
+            Err(AppError::new(
+                ErrorCode::Adb,
+                format!("`adb {}` failed: {}", args.join(" "), out.text()),
+            ))
         }
     }
 
     pub async fn start_server(&self) -> Result<(), AppError> {
-        self.run_ok(&["start-server"], Duration::from_secs(20)).await.map(|_| ())
+        self.run_ok(&["start-server"], Duration::from_secs(20))
+            .await
+            .map(|_| ())
     }
 
     pub async fn kill_server(&self) -> Result<(), AppError> {
         // Exits non-zero when no server runs; that's fine.
-        self.run(&["kill-server"], Duration::from_secs(10)).await.map(|_| ())
+        self.run(&["kill-server"], Duration::from_secs(10))
+            .await
+            .map(|_| ())
     }
 
     pub async fn version(&self) -> Result<String, AppError> {
@@ -173,59 +207,96 @@ impl Adb {
     }
 
     pub async fn devices(&self) -> Result<Vec<Device>, AppError> {
-        Ok(parse_devices(&self.run_ok(&["devices", "-l"], Duration::from_secs(15)).await?))
+        Ok(parse_devices(
+            &self
+                .run_ok(&["devices", "-l"], Duration::from_secs(15))
+                .await?,
+        ))
     }
 
     pub async fn usb_devices(&self) -> Result<Vec<Device>, AppError> {
-        Ok(self.devices().await?.into_iter().filter(|d| d.transport == Transport::Usb).collect())
+        Ok(self
+            .devices()
+            .await?
+            .into_iter()
+            .filter(|d| d.transport == Transport::Usb)
+            .collect())
     }
 
     /// `adb connect` exits 0 even when it fails, so interpret its text.
     pub async fn connect(&self, serial: &str) -> Result<(), AppError> {
-        let out = self.run(&["connect", serial], Duration::from_secs(20)).await?;
+        let out = self
+            .run(&["connect", serial], Duration::from_secs(20))
+            .await?;
         let text = out.text();
         let lower = text.to_lowercase();
-        if lower.contains("connected to") && !lower.contains("failed") && !lower.contains("cannot") {
+        if lower.contains("connected to") && !lower.contains("failed") && !lower.contains("cannot")
+        {
             Ok(())
         } else {
-            Err(AppError::new(ErrorCode::Adb, format!("adb connect {serial}: {text}")))
+            Err(AppError::new(
+                ErrorCode::Adb,
+                format!("adb connect {serial}: {text}"),
+            ))
         }
     }
 
     pub async fn disconnect(&self, serial: &str) -> Result<(), AppError> {
-        self.run(&["disconnect", serial], Duration::from_secs(10)).await.map(|_| ())
+        self.run(&["disconnect", serial], Duration::from_secs(10))
+            .await
+            .map(|_| ())
     }
 
     /// State of one device, or `None` if adb doesn't know it.
     pub async fn get_state(&self, serial: &str) -> Result<Option<DeviceState>, AppError> {
         let devices = self.devices().await?;
-        Ok(devices.into_iter().find(|d| d.serial == serial).map(|d| d.state))
+        Ok(devices
+            .into_iter()
+            .find(|d| d.serial == serial)
+            .map(|d| d.state))
     }
 
-    pub async fn shell(&self, serial: &str, command: &str, timeout: Duration) -> Result<String, AppError> {
-        self.run_ok(&["-s", serial, "shell", command], timeout).await
+    pub async fn shell(
+        &self,
+        serial: &str,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<String, AppError> {
+        self.run_ok(&["-s", serial, "shell", command], timeout)
+            .await
     }
 
     /// Restart adbd on the phone listening on TCP `port` (over USB).
     pub async fn tcpip(&self, usb_serial: &str, port: u16) -> Result<(), AppError> {
         let p = port.to_string();
-        let out = self.run(&["-s", usb_serial, "tcpip", &p], Duration::from_secs(20)).await?;
+        let out = self
+            .run(&["-s", usb_serial, "tcpip", &p], Duration::from_secs(20))
+            .await?;
         let text = out.text();
         if out.success && !text.to_lowercase().contains("error") {
             Ok(())
         } else {
-            Err(AppError::new(ErrorCode::Adb, format!("adb tcpip {port}: {text}")))
+            Err(AppError::new(
+                ErrorCode::Adb,
+                format!("adb tcpip {port}: {text}"),
+            ))
         }
     }
 
     /// The phone's Tailscale IPv4 (from its tun interface), read over USB.
     pub async fn tailnet_ipv4(&self, serial: &str) -> Result<Option<Ipv4Addr>, AppError> {
-        let out = self.shell(serial, "ip -4 -o addr show", Duration::from_secs(10)).await?;
+        let out = self
+            .shell(serial, "ip -4 -o addr show", Duration::from_secs(10))
+            .await?;
         Ok(parse_tailnet_ipv4(&out))
     }
 
     pub async fn getprop(&self, serial: &str, prop: &str) -> Result<String, AppError> {
-        Ok(self.shell(serial, &format!("getprop {prop}"), Duration::from_secs(10)).await?.trim().to_string())
+        Ok(self
+            .shell(serial, &format!("getprop {prop}"), Duration::from_secs(10))
+            .await?
+            .trim()
+            .to_string())
     }
 }
 
@@ -262,9 +333,15 @@ mod tests {
             30: wlan0    inet 192.168.1.20/24 brd 192.168.1.255 scope global wlan0\n\
             41: rmnet_data2    inet 10.161.4.5/30 scope global rmnet_data2\n\
             52: tun0    inet 100.101.102.103/32 scope global tun0\n";
-        assert_eq!(parse_tailnet_ipv4(text), Some(Ipv4Addr::new(100, 101, 102, 103)));
+        assert_eq!(
+            parse_tailnet_ipv4(text),
+            Some(Ipv4Addr::new(100, 101, 102, 103))
+        );
         // 100.0.0.0/8 outside the CGNAT range is not a tailnet address.
         assert_eq!(parse_tailnet_ipv4("inet 100.200.1.1/32"), None);
-        assert_eq!(parse_tailnet_ipv4("inet 100.127.255.1/32"), Some(Ipv4Addr::new(100, 127, 255, 1)));
+        assert_eq!(
+            parse_tailnet_ipv4("inet 100.127.255.1/32"),
+            Some(Ipv4Addr::new(100, 127, 255, 1))
+        );
     }
 }

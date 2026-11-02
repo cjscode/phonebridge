@@ -71,7 +71,11 @@ impl TailnetManager {
     async fn start_with(self: &Arc<Self>, auth_key: Option<String>) -> Result<(), AppError> {
         self.close_node().await;
         self.tx.send_replace(TailnetSnapshot::starting());
-        let cfg = NodeConfig { state_dir: self.state_dir.clone(), hostname: self.hostname.clone(), auth_key };
+        let cfg = NodeConfig {
+            state_dir: self.state_dir.clone(),
+            hostname: self.hostname.clone(),
+            auth_key,
+        };
         let node = tokio::task::spawn_blocking(move || -> Result<Arc<Node>, AppError> {
             let node = Node::new(&cfg)?;
             node.start()?;
@@ -82,7 +86,10 @@ impl TailnetManager {
         let node = match node {
             Ok(n) => n,
             Err(e) => {
-                self.tx.send_replace(TailnetSnapshot::with_state(TailnetState::Error { message: e.message.clone() }));
+                self.tx
+                    .send_replace(TailnetSnapshot::with_state(TailnetState::Error {
+                        message: e.message.clone(),
+                    }));
                 return Err(e);
             }
         };
@@ -135,7 +142,9 @@ impl TailnetManager {
                 return None;
             }
             Ok(Err(e)) => TailnetSnapshot::with_state(TailnetState::Error { message: e.message }),
-            Err(e) => TailnetSnapshot::with_state(TailnetState::Error { message: e.to_string() }),
+            Err(e) => TailnetSnapshot::with_state(TailnetState::Error {
+                message: e.to_string(),
+            }),
         })
     }
 
@@ -184,7 +193,10 @@ impl TailnetManager {
         match std::fs::remove_dir_all(&self.state_dir) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(AppError::new(ErrorCode::Io, format!("removing {}: {e}", self.state_dir.display()))),
+            Err(e) => Err(AppError::new(
+                ErrorCode::Io,
+                format!("removing {}: {e}", self.state_dir.display()),
+            )),
         }
     }
 
@@ -198,11 +210,15 @@ impl TailnetManager {
     /// Stop the node (on quit).
     pub async fn shutdown(&self) {
         self.close_node().await;
-        self.tx.send_replace(TailnetSnapshot::with_state(TailnetState::Stopped));
+        self.tx
+            .send_replace(TailnetSnapshot::with_state(TailnetState::Stopped));
     }
 
     pub fn dialer(self: &Arc<Self>) -> Arc<TailnetDialer> {
-        Arc::new(TailnetDialer { manager: self.clone(), timeout: Duration::from_secs(10) })
+        Arc::new(TailnetDialer {
+            manager: self.clone(),
+            timeout: Duration::from_secs(10),
+        })
     }
 }
 
@@ -228,9 +244,11 @@ impl Dialer for TailnetDialer {
                 Ok(Ok(res)) => res?,
             };
             let std_stream = std::os::unix::net::UnixStream::from(fd);
-            std_stream.set_nonblocking(true).map_err(|e| DialError::Other(e.to_string()))?;
-            let stream =
-                tokio::net::UnixStream::from_std(std_stream).map_err(|e| DialError::Other(e.to_string()))?;
+            std_stream
+                .set_nonblocking(true)
+                .map_err(|e| DialError::Other(e.to_string()))?;
+            let stream = tokio::net::UnixStream::from_std(std_stream)
+                .map_err(|e| DialError::Other(e.to_string()))?;
             Ok(Box::new(stream) as BoxStream)
         })
     }

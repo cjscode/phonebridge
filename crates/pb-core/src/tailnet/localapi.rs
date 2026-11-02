@@ -14,28 +14,47 @@ use super::node::Loopback;
 use crate::error::{AppError, ErrorCode};
 
 pub fn post(lb: &Loopback, path: &str) -> Result<(u16, String), AppError> {
-    let auth = base64::engine::general_purpose::STANDARD.encode(format!("tsnet:{}", lb.local_api_cred));
+    let auth =
+        base64::engine::general_purpose::STANDARD.encode(format!("tsnet:{}", lb.local_api_cred));
     let req = format!(
         "POST /localapi/v0/{path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Basic {auth}\r\n\
          Sec-Tailscale: localapi\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         host = lb.addr
     );
-    let err = |e: std::io::Error| AppError::new(ErrorCode::Tailnet, format!("LocalAPI {path}: {e}"));
+    let err =
+        |e: std::io::Error| AppError::new(ErrorCode::Tailnet, format!("LocalAPI {path}: {e}"));
     let mut stream = TcpStream::connect(&lb.addr).map_err(err)?;
-    stream.set_read_timeout(Some(Duration::from_secs(20))).map_err(err)?;
-    stream.set_write_timeout(Some(Duration::from_secs(5))).map_err(err)?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .map_err(err)?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(err)?;
     stream.write_all(req.as_bytes()).map_err(err)?;
     let mut resp = Vec::new();
     stream.read_to_end(&mut resp).map_err(err)?;
-    parse_response(&resp)
-        .ok_or_else(|| AppError::new(ErrorCode::Tailnet, format!("LocalAPI {path}: malformed response")))
+    parse_response(&resp).ok_or_else(|| {
+        AppError::new(
+            ErrorCode::Tailnet,
+            format!("LocalAPI {path}: malformed response"),
+        )
+    })
 }
 
 /// Returns (status code, body).
 fn parse_response(resp: &[u8]) -> Option<(u16, String)> {
     let text = String::from_utf8_lossy(resp);
-    let status = text.lines().next()?.split_whitespace().nth(1)?.parse().ok()?;
-    let body = text.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+    let status = text
+        .lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()?;
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
     Some((status, body))
 }
 
@@ -45,7 +64,10 @@ pub fn logout(lb: &Loopback) -> Result<(), AppError> {
     if (200..300).contains(&code) {
         Ok(())
     } else {
-        Err(AppError::new(ErrorCode::Tailnet, format!("logout failed (HTTP {code}): {}", body.trim())))
+        Err(AppError::new(
+            ErrorCode::Tailnet,
+            format!("logout failed (HTTP {code}): {}", body.trim()),
+        ))
     }
 }
 
@@ -71,10 +93,15 @@ mod tests {
             let (mut s, _) = l.accept().unwrap();
             let mut buf = [0u8; 2048];
             let n = s.read(&mut buf).unwrap();
-            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").unwrap();
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
             String::from_utf8_lossy(&buf[..n]).into_owned()
         });
-        let lb = Loopback { addr, proxy_cred: "p".into(), local_api_cred: "secret".into() };
+        let lb = Loopback {
+            addr,
+            proxy_cred: "p".into(),
+            local_api_cred: "secret".into(),
+        };
         logout(&lb).unwrap();
         let req = server.join().unwrap();
         assert!(req.starts_with("POST /localapi/v0/logout HTTP/1.1\r\n"));

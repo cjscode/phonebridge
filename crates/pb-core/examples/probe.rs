@@ -34,7 +34,10 @@ fn usage() -> ExitCode {
 }
 
 fn workspace() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
 }
 
 fn host_triple() -> &'static str {
@@ -51,7 +54,8 @@ fn host_triple() -> &'static str {
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,tsnet=warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,tsnet=warn".into()),
         )
         .with_target(false)
         .init();
@@ -73,7 +77,9 @@ async fn main() -> ExitCode {
     } else {
         false
     };
-    let Some(cmd) = args.first().cloned() else { return usage() };
+    let Some(cmd) = args.first().cloned() else {
+        return usage();
+    };
     let arg = args.get(1).cloned();
 
     println!("tailnet state dir: {}", state.display());
@@ -89,8 +95,12 @@ async fn main() -> ExitCode {
 
     let result = match cmd.as_str() {
         "status" => cmd_status(&tn).await,
-        "login" => wait_running(&tn, Duration::from_secs(600)).await.map(|s| print_snapshot(&s)),
-        "peers" => wait_running(&tn, Duration::from_secs(60)).await.map(|s| print_snapshot(&s)),
+        "login" => wait_running(&tn, Duration::from_secs(600))
+            .await
+            .map(|s| print_snapshot(&s)),
+        "peers" => wait_running(&tn, Duration::from_secs(60))
+            .await
+            .map(|s| print_snapshot(&s)),
         "dial" => match arg.and_then(|a| a.parse::<SocketAddr>().ok()) {
             Some(addr) => cmd_dial(&tn, addr).await,
             None => return usage(),
@@ -133,7 +143,10 @@ fn print_snapshot(s: &TailnetSnapshot) {
         println!("health: {h}");
     }
     if !s.peers.is_empty() {
-        println!("\n{:<28} {:<9} {:<8} {:<17} link", "peer", "os", "online", "ipv4");
+        println!(
+            "\n{:<28} {:<9} {:<8} {:<17} link",
+            "peer", "os", "online", "ipv4"
+        );
         for p in &s.peers {
             println!(
                 "{:<28} {:<9} {:<8} {:<17} {:?}",
@@ -154,7 +167,9 @@ async fn cmd_status(tn: &Arc<TailnetManager>) -> R {
     loop {
         let s = rx.borrow_and_update().clone();
         match &s.state {
-            TailnetState::NeedsLogin { auth_url: Some(url) } => {
+            TailnetState::NeedsLogin {
+                auth_url: Some(url),
+            } => {
                 println!("NeedsLogin. Open this URL to add the node to your tailnet:\n  {url}");
                 return Ok(());
             }
@@ -166,13 +181,19 @@ async fn cmd_status(tn: &Arc<TailnetManager>) -> R {
             _ => {}
         }
         if Instant::now() > deadline {
-            return Err(format!("no login URL or Running state after 45s (last: {:?})", s.state));
+            return Err(format!(
+                "no login URL or Running state after 45s (last: {:?})",
+                s.state
+            ));
         }
         let _ = tokio::time::timeout(Duration::from_secs(1), rx.changed()).await;
     }
 }
 
-async fn wait_running(tn: &Arc<TailnetManager>, limit: Duration) -> Result<TailnetSnapshot, String> {
+async fn wait_running(
+    tn: &Arc<TailnetManager>,
+    limit: Duration,
+) -> Result<TailnetSnapshot, String> {
     let mut rx = tn.subscribe();
     let deadline = Instant::now() + limit;
     let mut shown_url = None::<String>;
@@ -180,15 +201,23 @@ async fn wait_running(tn: &Arc<TailnetManager>, limit: Duration) -> Result<Tailn
         let s = rx.borrow_and_update().clone();
         match &s.state {
             TailnetState::Running => return Ok(s),
-            TailnetState::NeedsLogin { auth_url: Some(url) } if shown_url.as_deref() != Some(url) => {
+            TailnetState::NeedsLogin {
+                auth_url: Some(url),
+            } if shown_url.as_deref() != Some(url) => {
                 println!("Waiting for Tailscale login… open:\n  {url}");
                 shown_url = Some(url.clone());
             }
-            TailnetState::NeedsMachineAuth => println!("Waiting for an admin to approve this node…"),
+            TailnetState::NeedsMachineAuth => {
+                println!("Waiting for an admin to approve this node…")
+            }
             _ => {}
         }
         if Instant::now() > deadline {
-            return Err(format!("tailnet not running after {}s (state {:?})", limit.as_secs(), s.state));
+            return Err(format!(
+                "tailnet not running after {}s (state {:?})",
+                limit.as_secs(),
+                s.state
+            ));
         }
         let _ = tokio::time::timeout(Duration::from_secs(2), rx.changed()).await;
     }
@@ -200,7 +229,10 @@ async fn cmd_dial(tn: &Arc<TailnetManager>, addr: SocketAddr) -> R {
     let t = Instant::now();
     match dialer.dial(addr).await {
         Ok(_stream) => {
-            println!("OK: TCP connection to {addr} through the tailnet in {:?}", t.elapsed());
+            println!(
+                "OK: TCP connection to {addr} through the tailnet in {:?}",
+                t.elapsed()
+            );
             Ok(())
         }
         Err(e) => Err(format!(
@@ -217,8 +249,13 @@ async fn cmd_dial(tn: &Arc<TailnetManager>, addr: SocketAddr) -> R {
 async fn start_forwarder(tn: &Arc<TailnetManager>, ip: IpAddr) -> Result<Arc<Forwarder>, String> {
     wait_running(tn, Duration::from_secs(60)).await?;
     let listener = bind_loopback(None).await.map_err(|e| e.to_string())?;
-    let fwd = Forwarder::start(listener, SocketAddr::new(ip, 5555), tn.dialer()).map_err(|e| e.to_string())?;
-    println!("forwarder: {} -> {ip}:5555 (adb serial {})", fwd.local_addr(), fwd.adb_serial());
+    let fwd = Forwarder::start(listener, SocketAddr::new(ip, 5555), tn.dialer())
+        .map_err(|e| e.to_string())?;
+    println!(
+        "forwarder: {} -> {ip}:5555 (adb serial {})",
+        fwd.local_addr(),
+        fwd.adb_serial()
+    );
     Ok(fwd)
 }
 
@@ -238,8 +275,13 @@ async fn cmd_forward(tn: &Arc<TailnetManager>, ip: IpAddr) -> R {
 
 fn tools() -> Result<BundledTools, String> {
     let t = BundledTools::from_source_tree(&workspace(), host_triple(), 25037);
-    t.check().map_err(|e| format!("{e} (run `cargo xtask fetch` first)"))?;
-    println!("using adb    {}\nusing scrcpy {}", t.adb.display(), t.scrcpy.display());
+    t.check()
+        .map_err(|e| format!("{e} (run `cargo xtask fetch` first)"))?;
+    println!(
+        "using adb    {}\nusing scrcpy {}",
+        t.adb.display(),
+        t.scrcpy.display()
+    );
     Ok(t)
 }
 
@@ -270,9 +312,15 @@ async fn cmd_adb_test(tn: &Arc<TailnetManager>, ip: IpAddr) -> R {
     let res = async {
         adb_connect(&adb, &serial).await?;
         let t = Instant::now();
-        let echo = adb.shell(&serial, "echo ok", Duration::from_secs(15)).await.map_err(|e| e.to_string())?;
+        let echo = adb
+            .shell(&serial, "echo ok", Duration::from_secs(15))
+            .await
+            .map_err(|e| e.to_string())?;
         println!("shell echo: {:?} in {:?}", echo.trim(), t.elapsed());
-        let model = adb.getprop(&serial, "ro.product.model").await.unwrap_or_default();
+        let model = adb
+            .getprop(&serial, "ro.product.model")
+            .await
+            .unwrap_or_default();
         println!("model: {model}");
 
         // Throughput: push 20 MB of random data.
@@ -290,15 +338,31 @@ async fn cmd_adb_test(tn: &Arc<TailnetManager>, ip: IpAddr) -> R {
         let t = Instant::now();
         let out = adb
             .run(
-                &["-s", &serial, "push", &tmp.to_string_lossy(), "/data/local/tmp/phonebridge-probe.bin"],
+                &[
+                    "-s",
+                    &serial,
+                    "push",
+                    &tmp.to_string_lossy(),
+                    "/data/local/tmp/phonebridge-probe.bin",
+                ],
                 Duration::from_secs(600),
             )
             .await
             .map_err(|e| e.to_string())?;
         let secs = t.elapsed().as_secs_f64();
         println!("push: {}", out.text());
-        println!("push throughput: {:.2} MB/s ({:.1} Mbit/s)", 20.97 / secs, 20.97 * 8.0 / secs);
-        let _ = adb.shell(&serial, "rm -f /data/local/tmp/phonebridge-probe.bin", Duration::from_secs(10)).await;
+        println!(
+            "push throughput: {:.2} MB/s ({:.1} Mbit/s)",
+            20.97 / secs,
+            20.97 * 8.0 / secs
+        );
+        let _ = adb
+            .shell(
+                &serial,
+                "rm -f /data/local/tmp/phonebridge-probe.bin",
+                Duration::from_secs(10),
+            )
+            .await;
         let _ = std::fs::remove_file(&tmp);
         let after = fwd.stats();
         println!(

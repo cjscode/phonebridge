@@ -30,8 +30,11 @@ pub async fn find_usb_phone(adb: &Adb) -> Result<UsbPhone, AppError> {
         }
         [one] => one.clone(),
         _ => {
-            return Err(AppError::new(ErrorCode::MultipleUsbDevices, format!("{} devices are connected over USB", usb.len()))
-                .hint("Unplug all but the phone you want to set up."));
+            return Err(AppError::new(
+                ErrorCode::MultipleUsbDevices,
+                format!("{} devices are connected over USB", usb.len()),
+            )
+            .hint("Unplug all but the phone you want to set up."));
         }
     };
     match dev.state {
@@ -41,19 +44,34 @@ pub async fn find_usb_phone(adb: &Adb) -> Result<UsbPhone, AppError> {
                 .hint("Unlock the phone and tap \"Allow\" on the \"Allow USB debugging?\" prompt (tick \"Always allow\"), then try again."));
         }
         DeviceState::NoPermissions => {
-            return Err(AppError::new(ErrorCode::Adb, "adb has no permission to use this USB device"));
+            return Err(AppError::new(
+                ErrorCode::Adb,
+                "adb has no permission to use this USB device",
+            ));
         }
         ref other => {
-            return Err(AppError::new(ErrorCode::Adb, format!("The phone is in state {other:?}"))
-                .hint("Unplug and replug the cable, then try again."));
+            return Err(
+                AppError::new(ErrorCode::Adb, format!("The phone is in state {other:?}"))
+                    .hint("Unplug and replug the cable, then try again."),
+            );
         }
     }
-    let model = adb.getprop(&dev.serial, "ro.product.model").await.unwrap_or_default();
-    let android_version = adb.getprop(&dev.serial, "ro.build.version.release").await.unwrap_or_default();
+    let model = adb
+        .getprop(&dev.serial, "ro.product.model")
+        .await
+        .unwrap_or_default();
+    let android_version = adb
+        .getprop(&dev.serial, "ro.build.version.release")
+        .await
+        .unwrap_or_default();
     let tailnet_ip = adb.tailnet_ipv4(&dev.serial).await.unwrap_or(None);
     Ok(UsbPhone {
         serial: dev.serial,
-        model: if model.is_empty() { dev.model.unwrap_or_default().replace('_', " ") } else { model },
+        model: if model.is_empty() {
+            dev.model.unwrap_or_default().replace('_', " ")
+        } else {
+            model
+        },
         android_version,
         tailnet_ip,
     })

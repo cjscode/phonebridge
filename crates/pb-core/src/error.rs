@@ -32,7 +32,11 @@ pub struct AppError {
 
 impl AppError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), hint: None }
+        Self {
+            code,
+            message: message.into(),
+            hint: None,
+        }
     }
 
     pub fn hint(mut self, hint: impl Into<String>) -> Self {

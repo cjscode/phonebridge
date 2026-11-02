@@ -26,7 +26,9 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
 
 /// Rebuild the menu (after status / favourites changes).
 pub fn refresh(app: &AppHandle) {
-    let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
     match build_menu(app) {
         Ok(menu) => {
             let _ = tray.set_menu(Some(menu));
@@ -46,11 +48,28 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 
     let mut favs = SubmenuBuilder::new(app, "Favorites");
     if settings.favorites.is_empty() {
-        favs = favs.item(&MenuItem::with_id(app, "nofav", "Star apps in the main window", false, None::<&str>)?);
+        favs = favs.item(&MenuItem::with_id(
+            app,
+            "nofav",
+            "Star apps in the main window",
+            false,
+            None::<&str>,
+        )?);
     }
     for pkg in &settings.favorites {
-        let name = settings.apps.iter().find(|a| &a.package == pkg).map(|a| a.name.clone()).unwrap_or_else(|| pkg.clone());
-        favs = favs.item(&MenuItem::with_id(app, format!("fav:{pkg}"), name, connected, None::<&str>)?);
+        let name = settings
+            .apps
+            .iter()
+            .find(|a| &a.package == pkg)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| pkg.clone());
+        favs = favs.item(&MenuItem::with_id(
+            app,
+            format!("fav:{pkg}"),
+            name,
+            connected,
+            None::<&str>,
+        )?);
     }
     let favs: Submenu<Wry> = favs.build()?;
 
@@ -59,7 +78,13 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         QualityPreset::Cellular => "Quality: Cellular (switch to Wi-Fi)",
     };
     let preset = MenuItem::with_id(app, "preset", preset_label, true, None::<&str>)?;
-    let reconnect = MenuItem::with_id(app, "reconnect", "Reconnect", state.conn.phone().is_some() && !connected, None::<&str>)?;
+    let reconnect = MenuItem::with_id(
+        app,
+        "reconnect",
+        "Reconnect",
+        state.conn.phone().is_some() && !connected,
+        None::<&str>,
+    )?;
     let show = MenuItem::with_id(app, "show", "Show PhoneBridge", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit PhoneBridge", true, Some("CmdOrCtrl+Q"))?;
 
@@ -126,7 +151,14 @@ fn on_menu(app: &AppHandle, id: &str) {
                     .find(|a| a.package == pkg)
                     .map(|a| a.name.clone())
                     .unwrap_or_else(|| pkg.to_string());
-                crate::commands::launch(&state, LaunchMode::App { package: pkg.to_string(), name }).map(|_| ())
+                crate::commands::launch(
+                    &state,
+                    LaunchMode::App {
+                        package: pkg.to_string(),
+                        name,
+                    },
+                )
+                .map(|_| ())
             }
             None => Ok(()),
         },

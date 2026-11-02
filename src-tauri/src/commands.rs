@@ -53,15 +53,19 @@ pub fn get_overview(state: State<'_, SharedState>) -> Overview {
 #[tauri::command]
 pub fn tailnet_open_login(app: AppHandle, state: State<'_, SharedState>) -> Res<()> {
     match state.tailnet.snapshot().state {
-        TailnetState::NeedsLogin { auth_url: Some(url) } => {
+        TailnetState::NeedsLogin {
+            auth_url: Some(url),
+        } => {
             *state.opened_auth_url.lock().unwrap() = Some(url.clone());
-            app.opener()
-                .open_url(&url, None::<&str>)
-                .map_err(|e| AppError::new(ErrorCode::Io, format!("Couldn't open the browser: {e}")).hint(url))
+            app.opener().open_url(&url, None::<&str>).map_err(|e| {
+                AppError::new(ErrorCode::Io, format!("Couldn't open the browser: {e}")).hint(url)
+            })
         }
-        TailnetState::NeedsLogin { auth_url: None } | TailnetState::Starting => {
-            Err(AppError::new(ErrorCode::Tailnet, "The login link isn't ready yet").hint("Wait a few seconds and try again."))
-        }
+        TailnetState::NeedsLogin { auth_url: None } | TailnetState::Starting => Err(AppError::new(
+            ErrorCode::Tailnet,
+            "The login link isn't ready yet",
+        )
+        .hint("Wait a few seconds and try again.")),
         _ => Err(AppError::new(ErrorCode::Tailnet, "Already logged in")),
     }
 }
@@ -94,8 +98,11 @@ fn require_tailnet(state: &SharedState) -> Res<TailnetSnapshot> {
     if snap.is_running() {
         Ok(snap)
     } else {
-        Err(AppError::new(ErrorCode::NotLoggedIn, "PhoneBridge isn't online on your tailnet yet")
-            .hint("Log in to Tailscale first (see the banner at the top)."))
+        Err(AppError::new(
+            ErrorCode::NotLoggedIn,
+            "PhoneBridge isn't online on your tailnet yet",
+        )
+        .hint("Log in to Tailscale first (see the banner at the top)."))
     }
 }
 
@@ -103,25 +110,43 @@ fn require_tailnet(state: &SharedState) -> Res<TailnetSnapshot> {
 pub async fn usb_detect(state: State<'_, SharedState>) -> Res<UsbDetect> {
     let snap = require_tailnet(&state)?;
     let phone = setup::find_usb_phone(&state.adb).await?;
-    let suggested_peer_id = phone.tailnet_ip.and_then(|ip| setup::match_peer(&snap, ip)).map(|p| p.id);
-    Ok(UsbDetect { phone, suggested_peer_id, peers: snap.peers })
+    let suggested_peer_id = phone
+        .tailnet_ip
+        .and_then(|ip| setup::match_peer(&snap, ip))
+        .map(|p| p.id);
+    Ok(UsbDetect {
+        phone,
+        suggested_peer_id,
+        peers: snap.peers,
+    })
 }
 
 /// Enable adb over TCP on the USB phone and remember the chosen tailnet peer.
 #[tauri::command]
-pub async fn usb_setup(app: AppHandle, state: State<'_, SharedState>, serial: String, peer_id: String) -> Res<PhoneConfig> {
+pub async fn usb_setup(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    serial: String,
+    peer_id: String,
+) -> Res<PhoneConfig> {
     let snap = require_tailnet(&state)?;
-    let peer = snap
-        .peer_by_id(&peer_id)
-        .cloned()
-        .ok_or_else(|| AppError::new(ErrorCode::BadInput, "That device is no longer on your tailnet"))?;
+    let peer = snap.peer_by_id(&peer_id).cloned().ok_or_else(|| {
+        AppError::new(
+            ErrorCode::BadInput,
+            "That device is no longer on your tailnet",
+        )
+    })?;
     let ip = peer
         .ipv4()
         .map(std::net::IpAddr::V4)
         .or_else(|| peer.ips.first().copied())
         .ok_or_else(|| AppError::new(ErrorCode::BadInput, "That device has no tailnet IP"))?;
     setup::enable_tcpip(&state.adb, &serial, 5555).await?;
-    let phone = PhoneConfig { node_id: peer.id.clone(), name: peer.display_name(), ip };
+    let phone = PhoneConfig {
+        node_id: peer.id.clone(),
+        name: peer.display_name(),
+        ip,
+    };
     let settings = state
         .settings
         .update(|s| {
@@ -155,7 +180,10 @@ pub async fn usb_reenable(state: State<'_, SharedState>) -> Res<Reenabled> {
             "The phone on USB has tailnet IP {ip}, but the saved phone ({}) is {}. Use \"Set up via USB\" if this is a different phone.",
             saved.name, saved.ip
         )),
-        None => Some("Tailscale doesn't seem to be running on the phone. Open the Tailscale app on it.".into()),
+        None => Some(
+            "Tailscale doesn't seem to be running on the phone. Open the Tailscale app on it."
+                .into(),
+        ),
         _ => None,
     };
     setup::enable_tcpip(&state.adb, &usb.serial, 5555).await?;
@@ -181,7 +209,10 @@ pub async fn forget_phone(app: AppHandle, state: State<'_, SharedState>) -> Res<
 #[tauri::command]
 pub async fn connect_now(state: State<'_, SharedState>) -> Res<()> {
     if state.conn.phone().is_none() {
-        return Err(AppError::new(ErrorCode::PhoneNotSetUp, "No phone is set up yet").hint("Use \"Set up via USB\"."));
+        return Err(
+            AppError::new(ErrorCode::PhoneNotSetUp, "No phone is set up yet")
+                .hint("Use \"Set up via USB\"."),
+        );
     }
     state.conn.connect_now().await;
     Ok(())
@@ -199,12 +230,19 @@ pub async fn disconnect(state: State<'_, SharedState>) -> Res<()> {
 fn connected_serial(state: &SharedState) -> Res<String> {
     state.conn.serial().ok_or_else(|| {
         let why = state.conn.status().summary();
-        AppError::new(ErrorCode::PhoneUnreachable, format!("The phone isn't connected ({why})"))
+        AppError::new(
+            ErrorCode::PhoneUnreachable,
+            format!("The phone isn't connected ({why})"),
+        )
     })
 }
 
 #[tauri::command]
-pub async fn list_apps(app: AppHandle, state: State<'_, SharedState>, refresh: bool) -> Res<Vec<AndroidApp>> {
+pub async fn list_apps(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    refresh: bool,
+) -> Res<Vec<AndroidApp>> {
     let cached = state.settings.get().apps;
     if !refresh && !cached.is_empty() {
         return Ok(cached);
@@ -212,7 +250,10 @@ pub async fn list_apps(app: AppHandle, state: State<'_, SharedState>, refresh: b
     let serial = connected_serial(&state)?;
     let mut apps = state.scrcpy.list_apps(&serial).await?;
     apps.sort_by_key(|a| a.name.to_lowercase());
-    let settings = state.settings.update(|s| s.apps = apps.clone()).map_err(settings_err)?;
+    let settings = state
+        .settings
+        .update(|s| s.apps = apps.clone())
+        .map_err(settings_err)?;
     let _ = app.emit("settings", &settings);
     Ok(apps)
 }
@@ -227,20 +268,28 @@ pub fn launch(state: &SharedState, mode: LaunchMode) -> Res<WindowInfo> {
     let (label, package) = match &mode {
         LaunchMode::Mirror => {
             if state.procs.list().iter().any(|w| w.package.is_none()) {
-                return Err(AppError::new(ErrorCode::BadInput, "The full mirror is already open"));
+                return Err(AppError::new(
+                    ErrorCode::BadInput,
+                    "The full mirror is already open",
+                ));
             }
             ("Full mirror".to_string(), None)
         }
         LaunchMode::App { package, name } => {
             if state.procs.find_package(package).is_some() {
-                return Err(AppError::new(ErrorCode::BadInput, format!("{name} is already open in a window")));
+                return Err(AppError::new(
+                    ErrorCode::BadInput,
+                    format!("{name} is already open in a window"),
+                ));
             }
             (name.clone(), Some(package.clone()))
         }
     };
     let args = window_args(&serial, settings.preset, &mode, &settings.window);
     tracing::info!("launching scrcpy {}", args.join(" "));
-    state.procs.spawn(state.scrcpy.command(&args), label, package)
+    state
+        .procs
+        .spawn(state.scrcpy.command(&args), label, package)
 }
 
 #[tauri::command]
@@ -262,7 +311,12 @@ pub async fn close_window(state: State<'_, SharedState>, id: u64) -> Res<()> {
 // ---- Preferences -----------------------------------------------------------
 
 #[tauri::command]
-pub fn set_favorite(app: AppHandle, state: State<'_, SharedState>, package: String, favorite: bool) -> Res<Settings> {
+pub fn set_favorite(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    package: String,
+    favorite: bool,
+) -> Res<Settings> {
     let s = state
         .settings
         .update(|s| {
@@ -278,16 +332,30 @@ pub fn set_favorite(app: AppHandle, state: State<'_, SharedState>, package: Stri
 }
 
 #[tauri::command]
-pub fn set_preset(app: AppHandle, state: State<'_, SharedState>, preset: QualityPreset) -> Res<Settings> {
-    let s = state.settings.update(|s| s.preset = preset).map_err(settings_err)?;
+pub fn set_preset(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    preset: QualityPreset,
+) -> Res<Settings> {
+    let s = state
+        .settings
+        .update(|s| s.preset = preset)
+        .map_err(settings_err)?;
     let _ = app.emit("settings", &s);
     crate::tray::refresh(&app);
     Ok(s)
 }
 
 #[tauri::command]
-pub fn set_window_options(app: AppHandle, state: State<'_, SharedState>, options: WindowOptions) -> Res<Settings> {
-    let s = state.settings.update(|s| s.window = options).map_err(settings_err)?;
+pub fn set_window_options(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    options: WindowOptions,
+) -> Res<Settings> {
+    let s = state
+        .settings
+        .update(|s| s.window = options)
+        .map_err(settings_err)?;
     let _ = app.emit("settings", &s);
     Ok(s)
 }
@@ -314,8 +382,16 @@ pub struct Diagnostics {
 
 #[tauri::command]
 pub async fn diagnostics(state: State<'_, SharedState>) -> Res<Diagnostics> {
-    let adb_version = state.adb.version().await.unwrap_or_else(|e| format!("error: {e}"));
-    let scrcpy_version = state.scrcpy.version().await.unwrap_or_else(|e| format!("error: {e}"));
+    let adb_version = state
+        .adb
+        .version()
+        .await
+        .unwrap_or_else(|e| format!("error: {e}"));
+    let scrcpy_version = state
+        .scrcpy
+        .version()
+        .await
+        .unwrap_or_else(|e| format!("error: {e}"));
     let system_copies = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"]
         .iter()
         .flat_map(|d| ["adb", "scrcpy"].map(|b| std::path::Path::new(d).join(b)))

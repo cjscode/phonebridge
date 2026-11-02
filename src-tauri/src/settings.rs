@@ -66,7 +66,10 @@ impl<R: Runtime> SettingsStore<R> {
                 Settings::default()
             }
         };
-        Self { app: app.clone(), data: Mutex::new(data) }
+        Self {
+            app: app.clone(),
+            data: Mutex::new(data),
+        }
     }
 
     pub fn get(&self) -> Settings {
@@ -81,7 +84,10 @@ impl<R: Runtime> SettingsStore<R> {
             d.clone()
         };
         let store = self.app.store(STORE_FILE).map_err(|e| e.to_string())?;
-        store.set(KEY, serde_json::to_value(&snapshot).map_err(|e| e.to_string())?);
+        store.set(
+            KEY,
+            serde_json::to_value(&snapshot).map_err(|e| e.to_string())?,
+        );
         store.save().map_err(|e| format!("saving settings: {e}"))?;
         Ok(snapshot)
     }

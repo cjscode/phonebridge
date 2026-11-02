@@ -41,7 +41,9 @@ impl Dialer for TcpDialer {
         Box::pin(async move {
             match tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(addr)).await {
                 Err(_) => Err(DialError::Timeout),
-                Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => Err(DialError::Refused),
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    Err(DialError::Refused)
+                }
                 Ok(Err(e)) => Err(DialError::classify(&e.to_string())),
                 Ok(Ok(s)) => {
                     let _ = s.set_nodelay(true);
@@ -55,9 +57,19 @@ impl Dialer for TcpDialer {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ForwarderEvent {
-    Opened { id: u64 },
-    Closed { id: u64, bytes_up: u64, bytes_down: u64, error: Option<String> },
-    DialFailed { id: u64, error: DialError },
+    Opened {
+        id: u64,
+    },
+    Closed {
+        id: u64,
+        bytes_up: u64,
+        bytes_down: u64,
+        error: Option<String>,
+    },
+    DialFailed {
+        id: u64,
+        error: DialError,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -94,10 +106,10 @@ const ADB_EMULATOR_PORTS: std::ops::RangeInclusive<u16> = 5554..=5585;
 
 /// Bind 127.0.0.1 on `preferred` if free, else on a random port in 20000..60000.
 pub async fn bind_loopback(preferred: Option<u16>) -> std::io::Result<TcpListener> {
-    if let Some(p) = preferred.filter(|p| *p != 0 && !ADB_EMULATOR_PORTS.contains(p)) {
-        if let Ok(l) = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, p)).await {
-            return Ok(l);
-        }
+    if let Some(p) = preferred.filter(|p| *p != 0 && !ADB_EMULATOR_PORTS.contains(p))
+        && let Ok(l) = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, p)).await
+    {
+        return Ok(l);
     }
     let mut seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -119,7 +131,11 @@ pub async fn bind_loopback(preferred: Option<u16>) -> std::io::Result<TcpListene
 
 impl Forwarder {
     /// Start forwarding connections accepted on `listener` to `target` via `dialer`.
-    pub fn start(listener: TcpListener, target: SocketAddr, dialer: Arc<dyn Dialer>) -> std::io::Result<Arc<Self>> {
+    pub fn start(
+        listener: TcpListener,
+        target: SocketAddr,
+        dialer: Arc<dyn Dialer>,
+    ) -> std::io::Result<Arc<Self>> {
         let local = listener.local_addr()?;
         let (target_tx, target_rx) = watch::channel(target);
         let (events, _) = broadcast::channel(64);
@@ -133,7 +149,9 @@ impl Forwarder {
             stop: stop_tx,
             task: Mutex::new(None),
         });
-        let handle = tokio::spawn(accept_loop(listener, target_rx, dialer, counters, events, stop_rx));
+        let handle = tokio::spawn(accept_loop(
+            listener, target_rx, dialer, counters, events, stop_rx,
+        ));
         *fwd.task.lock().unwrap() = Some(handle);
         tracing::info!("forwarder listening on {local} -> {target}");
         Ok(fwd)
@@ -252,9 +270,19 @@ async fn handle_conn(
         *c.last_error.lock().unwrap() = Some(e.clone());
     }
     let (bytes_up, bytes_down) = (up.load(Ordering::Relaxed), down.load(Ordering::Relaxed));
-    tracing::info!("forwarder #{id}: closed (up {bytes_up} B, down {bytes_down} B{})",
-        error.as_deref().map(|e| format!(", error: {e}")).unwrap_or_default());
-    let _ = events.send(ForwarderEvent::Closed { id, bytes_up, bytes_down, error });
+    tracing::info!(
+        "forwarder #{id}: closed (up {bytes_up} B, down {bytes_down} B{})",
+        error
+            .as_deref()
+            .map(|e| format!(", error: {e}"))
+            .unwrap_or_default()
+    );
+    let _ = events.send(ForwarderEvent::Closed {
+        id,
+        bytes_up,
+        bytes_down,
+        error,
+    });
 }
 
 /// Copy until EOF, then half-close the writer.
@@ -298,7 +326,12 @@ mod tests {
     #[tokio::test]
     async fn echoes_and_counts() {
         let target = echo_server().await;
-        let fwd = Forwarder::start(bind_loopback(None).await.unwrap(), target, Arc::new(TcpDialer)).unwrap();
+        let fwd = Forwarder::start(
+            bind_loopback(None).await.unwrap(),
+            target,
+            Arc::new(TcpDialer),
+        )
+        .unwrap();
         let mut s = TcpStream::connect(fwd.local_addr()).await.unwrap();
         s.write_all(b"hello adb").await.unwrap();
         let mut buf = [0u8; 9];
@@ -319,7 +352,12 @@ mod tests {
     #[tokio::test]
     async fn throughput_100mb() {
         let target = echo_server().await;
-        let fwd = Forwarder::start(bind_loopback(None).await.unwrap(), target, Arc::new(TcpDialer)).unwrap();
+        let fwd = Forwarder::start(
+            bind_loopback(None).await.unwrap(),
+            target,
+            Arc::new(TcpDialer),
+        )
+        .unwrap();
         let s = TcpStream::connect(fwd.local_addr()).await.unwrap();
         let (mut r, mut w) = s.into_split();
         const N: usize = 100 * 1024 * 1024;
@@ -345,7 +383,10 @@ mod tests {
         writer.await.unwrap();
         assert_eq!(got, N);
         let secs = start.elapsed().as_secs_f64();
-        eprintln!("forwarder loopback throughput: {:.0} MB/s", (N as f64 / 1e6) / secs);
+        eprintln!(
+            "forwarder loopback throughput: {:.0} MB/s",
+            (N as f64 / 1e6) / secs
+        );
         fwd.stop().await;
     }
 
@@ -356,11 +397,20 @@ mod tests {
             let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
             l.local_addr().unwrap()
         };
-        let fwd = Forwarder::start(bind_loopback(None).await.unwrap(), dead, Arc::new(TcpDialer)).unwrap();
+        let fwd = Forwarder::start(
+            bind_loopback(None).await.unwrap(),
+            dead,
+            Arc::new(TcpDialer),
+        )
+        .unwrap();
         let mut events = fwd.subscribe();
         let mut s = TcpStream::connect(fwd.local_addr()).await.unwrap();
         let mut buf = [0u8; 1];
-        assert_eq!(s.read(&mut buf).await.unwrap_or(0), 0, "client should see EOF");
+        assert_eq!(
+            s.read(&mut buf).await.unwrap_or(0),
+            0,
+            "client should see EOF"
+        );
         match events.recv().await.unwrap() {
             ForwarderEvent::DialFailed { error, .. } => assert_eq!(error, DialError::Refused),
             other => panic!("unexpected {other:?}"),
@@ -372,7 +422,8 @@ mod tests {
     #[tokio::test]
     async fn retarget_applies_to_new_connections() {
         let a = echo_server().await;
-        let fwd = Forwarder::start(bind_loopback(None).await.unwrap(), a, Arc::new(TcpDialer)).unwrap();
+        let fwd =
+            Forwarder::start(bind_loopback(None).await.unwrap(), a, Arc::new(TcpDialer)).unwrap();
         let b = echo_server().await;
         fwd.set_target(b);
         assert_eq!(fwd.target(), b);
@@ -386,13 +437,21 @@ mod tests {
     #[tokio::test]
     async fn stop_closes_active_connections() {
         let target = echo_server().await;
-        let fwd = Forwarder::start(bind_loopback(None).await.unwrap(), target, Arc::new(TcpDialer)).unwrap();
+        let fwd = Forwarder::start(
+            bind_loopback(None).await.unwrap(),
+            target,
+            Arc::new(TcpDialer),
+        )
+        .unwrap();
         let mut s = TcpStream::connect(fwd.local_addr()).await.unwrap();
         s.write_all(b"x").await.unwrap();
         let mut buf = [0u8; 1];
         s.read_exact(&mut buf).await.unwrap();
         fwd.stop().await;
-        let n = tokio::time::timeout(Duration::from_secs(2), s.read(&mut buf)).await.unwrap().unwrap_or(0);
+        let n = tokio::time::timeout(Duration::from_secs(2), s.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap_or(0);
         assert_eq!(n, 0);
         // (Not asserting the port is closed: parallel tests may rebind it.)
     }

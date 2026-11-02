@@ -34,17 +34,28 @@ fn init_logging(log_dir: &Path) -> Option<tracing_appender::non_blocking::Worker
     use tracing_subscriber::prelude::*;
     let filter = tracing_subscriber::EnvFilter::try_from_env("PHONEBRIDGE_LOG")
         .unwrap_or_else(|_| "info,tsnet=info,scrcpy=info,tao=warn,wry=warn".into());
-    let stderr = tracing_subscriber::fmt::layer().with_target(false).with_writer(std::io::stderr);
+    let stderr = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_writer(std::io::stderr);
     match std::fs::create_dir_all(log_dir) {
         Ok(()) => {
             let file = tracing_appender::rolling::daily(log_dir, "phonebridge.log");
             let (writer, guard) = tracing_appender::non_blocking(file);
-            let file_layer = tracing_subscriber::fmt::layer().with_ansi(false).with_writer(writer);
-            tracing_subscriber::registry().with(filter).with(stderr).with(file_layer).init();
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(writer);
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(stderr)
+                .with(file_layer)
+                .init();
             Some(guard)
         }
         Err(_) => {
-            tracing_subscriber::registry().with(filter).with(stderr).init();
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(stderr)
+                .init();
             None
         }
     }
@@ -53,12 +64,12 @@ fn init_logging(log_dir: &Path) -> Option<tracing_appender::non_blocking::Worker
 /// Free loopback port for our private adb server (chosen once, then saved).
 fn pick_adb_port() -> u16 {
     for _ in 0..50 {
-        if let Ok(l) = std::net::TcpListener::bind(("127.0.0.1", 0)) {
-            if let Ok(a) = l.local_addr() {
-                let p = a.port();
-                if (20000..60000).contains(&p) {
-                    return p;
-                }
+        if let Ok(l) = std::net::TcpListener::bind(("127.0.0.1", 0))
+            && let Ok(a) = l.local_addr()
+        {
+            let p = a.port();
+            if (20000..60000).contains(&p) {
+                return p;
             }
         }
     }
@@ -74,7 +85,11 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let guard = init_logging(&log_dir);
     // Keep the log writer alive for the whole process.
     app.manage(Mutex::new(guard));
-    tracing::info!("PhoneBridge {} starting; data {}", env!("CARGO_PKG_VERSION"), data_dir.display());
+    tracing::info!(
+        "PhoneBridge {} starting; data {}",
+        env!("CARGO_PKG_VERSION"),
+        data_dir.display()
+    );
 
     let settings = SettingsStore::load(&handle);
     if settings.get().adb_server_port == 0 {
@@ -86,13 +101,21 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let s = settings.get();
 
     // Bundled binaries live next to our executable (Contents/MacOS); data files in Resources.
-    let exe_dir: PathBuf = std::env::current_exe()?.parent().map(Path::to_path_buf).unwrap_or_default();
+    let exe_dir: PathBuf = std::env::current_exe()?
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
     let tools = BundledTools::new(&exe_dir, &resource_dir, s.adb_server_port);
     let tools_error = tools.check().err();
     if let Some(e) = &tools_error {
         tracing::error!("{e}");
     }
-    tracing::info!("adb: {} | scrcpy: {} | server: {}", tools.adb.display(), tools.scrcpy.display(), tools.scrcpy_server.display());
+    tracing::info!(
+        "adb: {} | scrcpy: {} | server: {}",
+        tools.adb.display(),
+        tools.scrcpy.display(),
+        tools.scrcpy_server.display()
+    );
 
     let pid_file = data_dir.join("children.json");
     let killed = procs::cleanup_stale(&pid_file);
@@ -111,7 +134,10 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             adb.clone(),
             tailnet.dialer(),
             tailnet.subscribe(),
-            ConnectionConfig { forwarder_port: s.forwarder_port, ..Default::default() },
+            ConnectionConfig {
+                forwarder_port: s.forwarder_port,
+                ..Default::default()
+            },
             s.phone.clone(),
         )
     });
@@ -171,13 +197,20 @@ fn spawn_pumps(app: &AppHandle, state: &SharedState) {
         loop {
             let snap = rx.borrow_and_update().clone();
             // First run: open the login page automatically (once per URL).
-            if let TailnetState::NeedsLogin { auth_url: Some(url) } = &snap.state {
+            if let TailnetState::NeedsLogin {
+                auth_url: Some(url),
+            } = &snap.state
+            {
                 let mut opened = st.opened_auth_url.lock().unwrap();
                 if opened.as_deref() != Some(url.as_str()) {
                     *opened = Some(url.clone());
                     tracing::info!("opening Tailscale login page");
                     if let Err(e) = h.opener().open_url(url, None::<&str>) {
-                        report_error(&h, AppError::new(ErrorCode::Io, format!("Couldn't open the browser: {e}")).hint(url.clone()));
+                        report_error(
+                            &h,
+                            AppError::new(ErrorCode::Io, format!("Couldn't open the browser: {e}"))
+                                .hint(url.clone()),
+                        );
                     }
                 }
             }
@@ -199,7 +232,9 @@ fn spawn_pumps(app: &AppHandle, state: &SharedState) {
             let port = st.conn.forwarder_port();
             let phone = st.conn.phone();
             let saved = st.settings.get();
-            if (port.is_some() && port != saved.forwarder_port) || (phone.is_some() && phone != saved.phone) {
+            if (port.is_some() && port != saved.forwarder_port)
+                || (phone.is_some() && phone != saved.phone)
+            {
                 let res = st.settings.update(|s| {
                     if port.is_some() {
                         s.forwarder_port = port;
@@ -208,11 +243,17 @@ fn spawn_pumps(app: &AppHandle, state: &SharedState) {
                         s.phone = phone.clone();
                     }
                 });
-                if let Err(e) = res {
-                    report_error(&h, AppError::new(ErrorCode::Io, e));
+                match res {
+                    Ok(s) => {
+                        let _ = h.emit("settings", &s);
+                    }
+                    Err(e) => report_error(&h, AppError::new(ErrorCode::Io, e)),
                 }
             }
-            if !status.is_connected() && !st.procs.list().is_empty() && !st.shutting_down.load(Ordering::Acquire) {
+            if !status.is_connected()
+                && !st.procs.list().is_empty()
+                && !st.shutting_down.load(Ordering::Acquire)
+            {
                 // scrcpy windows die with the adb transport anyway; their exit is reported below.
                 tracing::info!("connection lost with windows open");
             }
@@ -229,20 +270,31 @@ fn spawn_pumps(app: &AppHandle, state: &SharedState) {
         loop {
             match rx.recv().await {
                 Ok(ev) => {
-                    if let ProcEvent::Exited { window, success, requested, stderr_tail, code } = &ev {
-                        if !success && !requested && !st.shutting_down.load(Ordering::Acquire) {
-                            let reason = stderr_tail
-                                .iter()
-                                .rev()
-                                .find(|l| l.contains("ERROR") || l.contains("error"))
-                                .or(stderr_tail.last())
-                                .cloned()
-                                .unwrap_or_else(|| format!("exit code {code:?}"));
-                            report_error(
-                                &h,
-                                AppError::new(ErrorCode::Scrcpy, format!("{} window closed: {reason}", window.label)),
-                            );
-                        }
+                    if let ProcEvent::Exited {
+                        window,
+                        success,
+                        requested,
+                        stderr_tail,
+                        code,
+                    } = &ev
+                        && !success
+                        && !requested
+                        && !st.shutting_down.load(Ordering::Acquire)
+                    {
+                        let reason = stderr_tail
+                            .iter()
+                            .rev()
+                            .find(|l| l.contains("ERROR") || l.contains("error"))
+                            .or(stderr_tail.last())
+                            .cloned()
+                            .unwrap_or_else(|| format!("exit code {code:?}"));
+                        report_error(
+                            &h,
+                            AppError::new(
+                                ErrorCode::Scrcpy,
+                                format!("{} window closed: {reason}", window.label),
+                            ),
+                        );
                     }
                     let _ = h.emit("windows", st.procs.list());
                 }
@@ -266,7 +318,9 @@ async fn shutdown(state: SharedState) {
 
 fn main() {
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| tray::show_main(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            tray::show_main(app)
+        }))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .setup(setup)
@@ -296,7 +350,9 @@ fn main() {
 
     app.run(|app, event| match event {
         RunEvent::ExitRequested { api, .. } => {
-            let Some(state) = app.try_state::<SharedState>().map(|s| s.inner().clone()) else { return };
+            let Some(state) = app.try_state::<SharedState>().map(|s| s.inner().clone()) else {
+                return;
+            };
             if state.shutting_down.swap(true, Ordering::AcqRel) {
                 return; // second pass: cleanup done, let it exit
             }

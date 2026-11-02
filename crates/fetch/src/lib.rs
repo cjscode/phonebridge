@@ -7,6 +7,8 @@
 //!
 //! It is used by `libtailscale-sys/build.rs`, `src-tauri/build.rs` and `xtask`.
 
+pub mod bundle;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -20,7 +22,7 @@ use sha2::{Digest, Sha256};
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
-pub struct Error(String);
+pub struct Error(pub String);
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -172,7 +174,14 @@ pub fn fetch(archive: &Archive, cache: &Path) -> Result<PathBuf> {
     let partial = dest.with_extension("partial");
     let status = Command::new("curl")
         .args(["--fail", "--location", "--silent", "--show-error"])
-        .args(["--retry", "4", "--retry-delay", "2", "--connect-timeout", "30"])
+        .args([
+            "--retry",
+            "4",
+            "--retry-delay",
+            "2",
+            "--connect-timeout",
+            "30",
+        ])
         .arg("--output")
         .arg(&partial)
         .arg(&archive.url)
@@ -198,7 +207,11 @@ pub fn fetch(archive: &Archive, cache: &Path) -> Result<PathBuf> {
 /// Unpack a `.tar.gz` into `into` (created if missing).
 pub fn untar_gz(archive: &Path, into: &Path) -> Result<()> {
     fs::create_dir_all(into)?;
-    run(Command::new("tar").arg("-xzf").arg(archive).arg("-C").arg(into))
+    run(Command::new("tar")
+        .arg("-xzf")
+        .arg(archive)
+        .arg("-C")
+        .arg(into))
 }
 
 /// Unpack selected entries (or everything, if `entries` is empty) of a `.zip`.
@@ -281,7 +294,12 @@ mod tests {
         assert_eq!(pins.scrcpy.version, "5.0.1");
         assert!(pins.scrcpy.archives.contains_key("aarch64-apple-darwin"));
         assert!(pins.go.archives.contains_key("darwin-arm64"));
-        for a in pins.scrcpy.archives.values().chain(pins.go.archives.values()) {
+        for a in pins
+            .scrcpy
+            .archives
+            .values()
+            .chain(pins.go.archives.values())
+        {
             assert_eq!(a.sha256.len(), 64);
         }
         assert_eq!(pins.libtailscale.commit.len(), 40);

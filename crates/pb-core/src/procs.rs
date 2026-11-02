@@ -33,8 +33,16 @@ pub struct WindowInfo {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ProcEvent {
-    Started { window: WindowInfo },
-    Exited { window: WindowInfo, code: Option<i32>, success: bool, stderr_tail: Vec<String>, requested: bool },
+    Started {
+        window: WindowInfo,
+    },
+    Exited {
+        window: WindowInfo,
+        code: Option<i32>,
+        success: bool,
+        stderr_tail: Vec<String>,
+        requested: bool,
+    },
 }
 
 struct Entry {
@@ -75,33 +83,61 @@ impl ProcessRegistry {
     }
 
     pub fn list(&self) -> Vec<WindowInfo> {
-        let mut v: Vec<_> = self.entries.lock().unwrap().values().map(|e| e.info.clone()).collect();
+        let mut v: Vec<_> = self
+            .entries
+            .lock()
+            .unwrap()
+            .values()
+            .map(|e| e.info.clone())
+            .collect();
         v.sort_by_key(|w| w.id);
         v
     }
 
     pub fn find_package(&self, package: &str) -> Option<WindowInfo> {
-        self.entries.lock().unwrap().values().find(|e| e.info.package.as_deref() == Some(package)).map(|e| e.info.clone())
-    }
-
-    /// Spawn `cmd` as a tracked window.
-    pub fn spawn(self: &Arc<Self>, mut cmd: Command, label: String, package: Option<String>) -> Result<WindowInfo, AppError> {
-        cmd.stdout(Stdio::null()).stderr(Stdio::piped()).stdin(Stdio::null());
-        #[cfg(unix)]
-        cmd.process_group(0);
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| AppError::new(ErrorCode::Scrcpy, format!("could not start scrcpy: {e}")))?;
-        let pid = child.id().unwrap_or(0);
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let info = WindowInfo { id, label, package, pid };
-        let stop_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.entries
             .lock()
             .unwrap()
-            .insert(id, Entry { info: info.clone(), stop_requested: stop_requested.clone() });
+            .values()
+            .find(|e| e.info.package.as_deref() == Some(package))
+            .map(|e| e.info.clone())
+    }
+
+    /// Spawn `cmd` as a tracked window.
+    pub fn spawn(
+        self: &Arc<Self>,
+        mut cmd: Command,
+        label: String,
+        package: Option<String>,
+    ) -> Result<WindowInfo, AppError> {
+        cmd.stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null());
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let mut child = cmd.spawn().map_err(|e| {
+            AppError::new(ErrorCode::Scrcpy, format!("could not start scrcpy: {e}"))
+        })?;
+        let pid = child.id().unwrap_or(0);
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let info = WindowInfo {
+            id,
+            label,
+            package,
+            pid,
+        };
+        let stop_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.entries.lock().unwrap().insert(
+            id,
+            Entry {
+                info: info.clone(),
+                stop_requested: stop_requested.clone(),
+            },
+        );
         self.write_pid_file();
-        let _ = self.events.send(ProcEvent::Started { window: info.clone() });
+        let _ = self.events.send(ProcEvent::Started {
+            window: info.clone(),
+        });
 
         let tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_LINES)));
         let reader = child.stderr.take().map(|stderr| {
@@ -136,7 +172,13 @@ impl ProcessRegistry {
                 me.write_pid_file();
                 let requested = stop_requested.load(Ordering::Acquire);
                 if let Some(e) = removed {
-                    let _ = me.events.send(ProcEvent::Exited { window: e.info, code, success, stderr_tail, requested });
+                    let _ = me.events.send(ProcEvent::Exited {
+                        window: e.info,
+                        code,
+                        success,
+                        stderr_tail,
+                        requested,
+                    });
                 }
             }
         });
@@ -155,7 +197,10 @@ impl ProcessRegistry {
                 None => return,
             }
         };
-        terminate_group(pid, grace, || self.entries.lock().unwrap().contains_key(&id)).await;
+        terminate_group(pid, grace, || {
+            self.entries.lock().unwrap().contains_key(&id)
+        })
+        .await;
     }
 
     /// Terminate every window (on quit or disconnect).
@@ -174,7 +219,10 @@ impl ProcessRegistry {
             .lock()
             .unwrap()
             .values()
-            .map(|e| PidRecord { pid: e.info.pid, exe: self.exe_label.clone() })
+            .map(|e| PidRecord {
+                pid: e.info.pid,
+                exe: self.exe_label.clone(),
+            })
             .collect();
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -208,7 +256,9 @@ async fn terminate_group(_pid: u32, _grace: Duration, _still_running: impl Fn() 
 /// Kill children left over from a crashed previous run. Only kills a pid whose
 /// executable path still matches what we recorded.
 pub fn cleanup_stale(pid_file: &Path) -> usize {
-    let Ok(bytes) = std::fs::read(pid_file) else { return 0 };
+    let Ok(bytes) = std::fs::read(pid_file) else {
+        return 0;
+    };
     let records: Vec<PidRecord> = serde_json::from_slice(&bytes).unwrap_or_default();
     let mut killed = 0;
     for r in records {
@@ -232,12 +282,17 @@ pub fn cleanup_stale(pid_file: &Path) -> usize {
 fn exe_of(pid: u32) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        std::fs::read_link(format!("/proc/{pid}/exe")).ok().map(|p| p.to_string_lossy().into_owned())
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
     }
     #[cfg(not(target_os = "linux"))]
     {
         // On macOS `ps -o comm=` prints the full executable path.
-        let out = std::process::Command::new("/bin/ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok()?;
+        let out = std::process::Command::new("/bin/ps")
+            .args(["-o", "comm=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if s.is_empty() { None } else { Some(s) }
     }
@@ -252,15 +307,32 @@ mod tests {
         let reg = ProcessRegistry::new(None, Path::new("/bin/sh"));
         let mut events = reg.subscribe();
         let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", "echo 'ERROR: Could not open video stream' >&2; exit 3"]);
-        let w = reg.spawn(cmd, "Messages".into(), Some("com.x".into())).unwrap();
-        assert!(matches!(events.recv().await.unwrap(), ProcEvent::Started { .. }));
+        cmd.args([
+            "-c",
+            "echo 'ERROR: Could not open video stream' >&2; exit 3",
+        ]);
+        let w = reg
+            .spawn(cmd, "Messages".into(), Some("com.x".into()))
+            .unwrap();
+        assert!(matches!(
+            events.recv().await.unwrap(),
+            ProcEvent::Started { .. }
+        ));
         match events.recv().await.unwrap() {
-            ProcEvent::Exited { window, code, success, stderr_tail, requested } => {
+            ProcEvent::Exited {
+                window,
+                code,
+                success,
+                stderr_tail,
+                requested,
+            } => {
                 assert_eq!(window.id, w.id);
                 assert_eq!(code, Some(3));
                 assert!(!success && !requested);
-                assert_eq!(stderr_tail, vec!["ERROR: Could not open video stream".to_string()]);
+                assert_eq!(
+                    stderr_tail,
+                    vec!["ERROR: Could not open video stream".to_string()]
+                );
             }
             e => panic!("{e:?}"),
         }
@@ -280,20 +352,25 @@ mod tests {
             reg.spawn(cmd, format!("w{i}"), None).unwrap();
         }
         assert_eq!(reg.list().len(), 3);
-        let recorded: Vec<PidRecord> = serde_json::from_slice(&std::fs::read(&pid_file).unwrap()).unwrap();
+        let recorded: Vec<PidRecord> =
+            serde_json::from_slice(&std::fs::read(&pid_file).unwrap()).unwrap();
         assert_eq!(recorded.len(), 3);
         reg.terminate_all(Duration::from_secs(2)).await;
         let mut exited = 0;
         while exited < 3 {
             if let ProcEvent::Exited { requested, .. } =
-                tokio::time::timeout(Duration::from_secs(5), events.recv()).await.unwrap().unwrap()
+                tokio::time::timeout(Duration::from_secs(5), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
             {
                 assert!(requested);
                 exited += 1;
             }
         }
         assert!(reg.list().is_empty());
-        let recorded: Vec<PidRecord> = serde_json::from_slice(&std::fs::read(&pid_file).unwrap()).unwrap();
+        let recorded: Vec<PidRecord> =
+            serde_json::from_slice(&std::fs::read(&pid_file).unwrap()).unwrap();
         assert!(recorded.is_empty());
     }
 
@@ -301,14 +378,25 @@ mod tests {
     fn cleanup_stale_only_kills_matching_exe() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("children.json");
-        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
         let real_exe = exe_of(child.id()).unwrap();
         // Wrong exe recorded: must not be killed.
-        std::fs::write(&pid_file, format!(r#"[{{"pid":{},"exe":"/not/it"}}]"#, child.id())).unwrap();
+        std::fs::write(
+            &pid_file,
+            format!(r#"[{{"pid":{},"exe":"/not/it"}}]"#, child.id()),
+        )
+        .unwrap();
         assert_eq!(cleanup_stale(&pid_file), 0);
         assert!(child.try_wait().unwrap().is_none());
         // Matching exe: killed.
-        std::fs::write(&pid_file, format!(r#"[{{"pid":{},"exe":{:?}}}]"#, child.id(), real_exe)).unwrap();
+        std::fs::write(
+            &pid_file,
+            format!(r#"[{{"pid":{},"exe":{:?}}}]"#, child.id(), real_exe),
+        )
+        .unwrap();
         assert_eq!(cleanup_stale(&pid_file), 1);
         let status = child.wait().unwrap();
         assert!(!status.success());

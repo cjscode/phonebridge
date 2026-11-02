@@ -50,7 +50,10 @@ impl DialError {
         let m = msg.to_ascii_lowercase();
         if m.contains("refused") {
             DialError::Refused
-        } else if m.contains("timed out") || m.contains("timeout") || m.contains("deadline exceeded") {
+        } else if m.contains("timed out")
+            || m.contains("timeout")
+            || m.contains("deadline exceeded")
+        {
             DialError::Timeout
         } else if m.contains("no route")
             || m.contains("unreachable")
@@ -59,7 +62,10 @@ impl DialError {
             || m.contains("no matching peer")
         {
             DialError::Unreachable(msg.to_string())
-        } else if m.contains("not running") || m.contains("needslogin") || m.contains("server closed") {
+        } else if m.contains("not running")
+            || m.contains("needslogin")
+            || m.contains("server closed")
+        {
             DialError::NotRunning
         } else {
             DialError::Other(msg.to_string())
@@ -87,34 +93,51 @@ impl std::fmt::Debug for Node {
 }
 
 fn cstring(s: &str, what: &str) -> Result<CString, AppError> {
-    CString::new(s).map_err(|_| AppError::new(ErrorCode::BadInput, format!("{what} contains a NUL byte")))
+    CString::new(s)
+        .map_err(|_| AppError::new(ErrorCode::BadInput, format!("{what} contains a NUL byte")))
 }
 
 impl Node {
     /// Create (but don't start) a node.
     pub fn new(cfg: &NodeConfig) -> Result<Node, AppError> {
         std::fs::create_dir_all(&cfg.state_dir).map_err(|e| {
-            AppError::new(ErrorCode::Io, format!("creating {}: {e}", cfg.state_dir.display()))
+            AppError::new(
+                ErrorCode::Io,
+                format!("creating {}: {e}", cfg.state_dir.display()),
+            )
         })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&cfg.state_dir, std::fs::Permissions::from_mode(0o700));
+            let _ =
+                std::fs::set_permissions(&cfg.state_dir, std::fs::Permissions::from_mode(0o700));
         }
 
         let sd = unsafe { ffi::tailscale_new() };
         if sd < 0 {
             return Err(AppError::new(ErrorCode::Tailnet, "tailscale_new failed"));
         }
-        let node = Node { sd, closed: AtomicBool::new(false) };
+        let node = Node {
+            sd,
+            closed: AtomicBool::new(false),
+        };
 
         let dir = cstring(&cfg.state_dir.to_string_lossy(), "state dir")?;
-        node.check(unsafe { ffi::tailscale_set_dir(sd, dir.as_ptr()) }, "set_dir")?;
+        node.check(
+            unsafe { ffi::tailscale_set_dir(sd, dir.as_ptr()) },
+            "set_dir",
+        )?;
         let host = cstring(&cfg.hostname, "hostname")?;
-        node.check(unsafe { ffi::tailscale_set_hostname(sd, host.as_ptr()) }, "set_hostname")?;
+        node.check(
+            unsafe { ffi::tailscale_set_hostname(sd, host.as_ptr()) },
+            "set_hostname",
+        )?;
         if let Some(key) = cfg.auth_key.as_deref().filter(|k| !k.trim().is_empty()) {
             let key = cstring(key.trim(), "auth key")?;
-            node.check(unsafe { ffi::tailscale_set_authkey(sd, key.as_ptr()) }, "set_authkey")?;
+            node.check(
+                unsafe { ffi::tailscale_set_authkey(sd, key.as_ptr()) },
+                "set_authkey",
+            )?;
         }
         node.pipe_logs()?;
         Ok(node)
@@ -159,7 +182,9 @@ impl Node {
     fn errmsg(&self) -> String {
         let mut buf = vec![0 as c_char; 2048];
         unsafe { ffi::tailscale_errmsg(self.sd, buf.as_mut_ptr(), buf.len()) };
-        unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(buf.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn error(&self, op: &str) -> AppError {
@@ -213,7 +238,8 @@ impl Node {
         let network = c"tcp";
         let addr_c = CString::new(addr).map_err(|_| DialError::Other("bad address".into()))?;
         let mut fd: RawFd = -1;
-        let rc = unsafe { ffi::tailscale_dial(self.sd, network.as_ptr(), addr_c.as_ptr(), &mut fd) };
+        let rc =
+            unsafe { ffi::tailscale_dial(self.sd, network.as_ptr(), addr_c.as_ptr(), &mut fd) };
         if rc != 0 || fd < 0 {
             // lastErr is per-node; with concurrent dials it may belong to another
             // call. That only affects the classification, never correctness.
@@ -229,13 +255,27 @@ impl Node {
         let mut proxy = vec![0 as c_char; 33];
         let mut local = vec![0 as c_char; 33];
         let rc = unsafe {
-            ffi::tailscale_loopback(self.sd, addr.as_mut_ptr(), addr.len(), proxy.as_mut_ptr(), local.as_mut_ptr())
+            ffi::tailscale_loopback(
+                self.sd,
+                addr.as_mut_ptr(),
+                addr.len(),
+                proxy.as_mut_ptr(),
+                local.as_mut_ptr(),
+            )
         };
         if rc != 0 {
             return Err(self.error("loopback"));
         }
-        let s = |b: &[c_char]| unsafe { CStr::from_ptr(b.as_ptr()) }.to_string_lossy().into_owned();
-        Ok(Loopback { addr: s(&addr), proxy_cred: s(&proxy), local_api_cred: s(&local) })
+        let s = |b: &[c_char]| {
+            unsafe { CStr::from_ptr(b.as_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        Ok(Loopback {
+            addr: s(&addr),
+            proxy_cred: s(&proxy),
+            local_api_cred: s(&local),
+        })
     }
 
     /// Shut the node down. Idempotent.
@@ -265,10 +305,22 @@ mod tests {
 
     #[test]
     fn classify_errors() {
-        assert_eq!(DialError::classify("dial tcp 100.1.2.3:5555: connect: connection refused"), DialError::Refused);
-        assert_eq!(DialError::classify("connection was refused"), DialError::Refused);
-        assert_eq!(DialError::classify("dial tcp: i/o timeout"), DialError::Timeout);
-        assert!(matches!(DialError::classify("no route to host"), DialError::Unreachable(_)));
+        assert_eq!(
+            DialError::classify("dial tcp 100.1.2.3:5555: connect: connection refused"),
+            DialError::Refused
+        );
+        assert_eq!(
+            DialError::classify("connection was refused"),
+            DialError::Refused
+        );
+        assert_eq!(
+            DialError::classify("dial tcp: i/o timeout"),
+            DialError::Timeout
+        );
+        assert!(matches!(
+            DialError::classify("no route to host"),
+            DialError::Unreachable(_)
+        ));
         assert!(matches!(DialError::classify("weird"), DialError::Other(_)));
     }
 }

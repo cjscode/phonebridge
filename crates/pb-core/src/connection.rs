@@ -32,16 +32,32 @@ pub enum ConnectionStatus {
     /// Nothing set up yet; run "Set up via USB".
     NoPhone,
     /// Our tailnet node isn't online (logged out, starting, Mac offline).
-    TailnetOffline { detail: String },
-    Connecting { attempt: u32 },
-    Connected { serial: String, link: Option<PeerLink> },
+    TailnetOffline {
+        detail: String,
+    },
+    Connecting {
+        attempt: u32,
+    },
+    Connected {
+        serial: String,
+        link: Option<PeerLink>,
+    },
     /// Was connected (or a step failed); trying again.
-    Reconnecting { attempt: u32, retry_in_secs: u64, reason: String },
+    Reconnecting {
+        attempt: u32,
+        retry_in_secs: u64,
+        reason: String,
+    },
     /// The phone is reachable but nothing listens on 5555: it rebooted, so
     /// `adb tcpip` must be re-enabled over USB.
-    PhoneNeedsUsb { retry_in_secs: u64 },
+    PhoneNeedsUsb {
+        retry_in_secs: u64,
+    },
     /// The phone can't be reached on the tailnet (offline, asleep, Tailscale off).
-    PhoneUnreachable { detail: String, retry_in_secs: u64 },
+    PhoneUnreachable {
+        detail: String,
+        retry_in_secs: u64,
+    },
     /// adb is waiting for "Allow USB debugging?" on the phone.
     Unauthorized,
     /// The user disconnected.
@@ -59,8 +75,14 @@ impl ConnectionStatus {
             Self::NoPhone => "No phone set up".into(),
             Self::TailnetOffline { .. } => "Tailnet offline".into(),
             Self::Connecting { .. } => "Connecting…".into(),
-            Self::Connected { link: Some(PeerLink::Direct { .. }), .. } => "Connected (direct)".into(),
-            Self::Connected { link: Some(PeerLink::Derp { region }), .. } => format!("Connected (relayed via {region})"),
+            Self::Connected {
+                link: Some(PeerLink::Direct { .. }),
+                ..
+            } => "Connected (direct)".into(),
+            Self::Connected {
+                link: Some(PeerLink::Derp { region }),
+                ..
+            } => format!("Connected (relayed via {region})"),
             Self::Connected { .. } => "Connected".into(),
             Self::Reconnecting { .. } => "Reconnecting…".into(),
             Self::PhoneNeedsUsb { .. } => "Phone rebooted: plug in USB once".into(),
@@ -151,11 +173,21 @@ impl ConnectionHandle {
     }
 
     pub fn forwarder_port(&self) -> Option<u16> {
-        self.shared.forwarder.lock().unwrap().as_ref().map(|f| f.local_addr().port())
+        self.shared
+            .forwarder
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|f| f.local_addr().port())
     }
 
     pub fn forwarder_stats(&self) -> Option<ForwarderStats> {
-        self.shared.forwarder.lock().unwrap().as_ref().map(|f| f.stats())
+        self.shared
+            .forwarder
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|f| f.stats())
     }
 
     pub async fn set_phone(&self, phone: Option<PhoneConfig>) {
@@ -205,9 +237,16 @@ pub fn spawn(
     phone: Option<PhoneConfig>,
 ) -> ConnectionHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel(16);
-    let initial = if phone.is_some() { ConnectionStatus::Connecting { attempt: 0 } } else { ConnectionStatus::NoPhone };
+    let initial = if phone.is_some() {
+        ConnectionStatus::Connecting { attempt: 0 }
+    } else {
+        ConnectionStatus::NoPhone
+    };
     let (status_tx, status_rx) = watch::channel(initial);
-    let shared = Arc::new(Shared { forwarder: Mutex::new(None), phone: Mutex::new(phone.clone()) });
+    let shared = Arc::new(Shared {
+        forwarder: Mutex::new(None),
+        phone: Mutex::new(phone.clone()),
+    });
     let actor = Actor {
         adb,
         dialer,
@@ -224,7 +263,11 @@ pub fn spawn(
         ticks: 0,
     };
     tokio::spawn(actor.run(cmd_rx));
-    ConnectionHandle { cmd: cmd_tx, status: status_rx, shared }
+    ConnectionHandle {
+        cmd: cmd_tx,
+        status: status_rx,
+        shared,
+    }
 }
 
 impl Actor {
@@ -248,17 +291,16 @@ impl Actor {
                     self.try_connect().await;
                 }
                 ev = recv_fwd(&mut self.fwd_events) => {
-                    if let Some(ForwarderEvent::Closed { error, .. }) = ev {
-                        if self.serial.is_some() {
+                    if let Some(ForwarderEvent::Closed { error, .. }) = ev
+                        && self.serial.is_some() {
                             tracing::info!("adb transport connection closed ({error:?}); checking device");
                             self.check_alive(true).await;
                         }
-                    }
                 }
                 _ = keepalive.tick() => {
                     if self.serial.is_some() {
                         self.ticks = self.ticks.wrapping_add(1);
-                        let deep = self.cfg.liveness_every > 0 && self.ticks % self.cfg.liveness_every == 0;
+                        let deep = self.cfg.liveness_every > 0 && self.ticks.is_multiple_of(self.cfg.liveness_every);
                         self.check_alive(deep).await;
                     }
                 }
@@ -316,7 +358,11 @@ impl Actor {
                 self.want_connected = false;
                 self.next_try = None;
                 self.drop_device().await;
-                self.set(if self.phone.is_some() { ConnectionStatus::Disconnected } else { ConnectionStatus::NoPhone });
+                self.set(if self.phone.is_some() {
+                    ConnectionStatus::Disconnected
+                } else {
+                    ConnectionStatus::NoPhone
+                });
             }
             Cmd::Shutdown(_) => unreachable!(),
         }
@@ -330,23 +376,31 @@ impl Actor {
             }
             if self.want_connected && self.phone.is_some() {
                 self.next_try = None; // wait for the tailnet to come back
-                self.set(ConnectionStatus::TailnetOffline { detail: tailnet_detail(&snap.state) });
+                self.set(ConnectionStatus::TailnetOffline {
+                    detail: tailnet_detail(&snap.state),
+                });
             }
             return;
         }
         // Tailnet is up: if we were waiting on it, try now.
-        if self.want_connected && self.phone.is_some() && self.serial.is_none() {
-            if matches!(*self.status.borrow(), ConnectionStatus::TailnetOffline { .. } | ConnectionStatus::Connecting { .. })
-                || self.next_try.is_none()
-            {
-                self.attempt = 0;
-                self.schedule(Duration::ZERO);
-            }
+        if self.want_connected
+            && self.phone.is_some()
+            && self.serial.is_none()
+            && (matches!(
+                *self.status.borrow(),
+                ConnectionStatus::TailnetOffline { .. } | ConnectionStatus::Connecting { .. }
+            ) || self.next_try.is_none())
+        {
+            self.attempt = 0;
+            self.schedule(Duration::ZERO);
         }
         // Keep the link indicator fresh while connected.
         if let (Some(serial), Some(phone)) = (&self.serial, &self.phone) {
             let link = snap.peer_by_id(&phone.node_id).map(|p| p.link.clone());
-            self.set(ConnectionStatus::Connected { serial: serial.clone(), link });
+            self.set(ConnectionStatus::Connected {
+                serial: serial.clone(),
+                link,
+            });
         }
     }
 
@@ -357,8 +411,11 @@ impl Actor {
             }
             return Ok(f);
         }
-        let listener = bind_loopback(self.cfg.forwarder_port).await.map_err(|e| format!("forwarder bind: {e}"))?;
-        let f = Forwarder::start(listener, target, self.dialer.clone()).map_err(|e| format!("forwarder: {e}"))?;
+        let listener = bind_loopback(self.cfg.forwarder_port)
+            .await
+            .map_err(|e| format!("forwarder bind: {e}"))?;
+        let f = Forwarder::start(listener, target, self.dialer.clone())
+            .map_err(|e| format!("forwarder: {e}"))?;
         self.cfg.forwarder_port = Some(f.local_addr().port());
         self.fwd_events = Some(f.subscribe());
         *self.shared.forwarder.lock().unwrap() = Some(f.clone());
@@ -375,7 +432,9 @@ impl Actor {
         };
         let snap = self.tailnet.borrow().clone();
         if !snap.is_running() {
-            self.set(ConnectionStatus::TailnetOffline { detail: tailnet_detail(&snap.state) });
+            self.set(ConnectionStatus::TailnetOffline {
+                detail: tailnet_detail(&snap.state),
+            });
             return; // on_tailnet_change will retry
         }
 
@@ -389,18 +448,24 @@ impl Actor {
                 return;
             }
             Some(peer) => {
-                if let Some(ip) = peer.ipv4().map(IpAddr::V4).or_else(|| peer.ips.first().copied()) {
-                    if ip != phone.ip {
-                        tracing::info!("phone tailnet IP changed {} -> {ip}", phone.ip);
-                        phone.ip = ip;
-                        self.phone = Some(phone.clone());
-                        *self.shared.phone.lock().unwrap() = Some(phone.clone());
-                    }
+                if let Some(ip) = peer
+                    .ipv4()
+                    .map(IpAddr::V4)
+                    .or_else(|| peer.ips.first().copied())
+                    && ip != phone.ip
+                {
+                    tracing::info!("phone tailnet IP changed {} -> {ip}", phone.ip);
+                    phone.ip = ip;
+                    self.phone = Some(phone.clone());
+                    *self.shared.phone.lock().unwrap() = Some(phone.clone());
                 }
                 if !peer.online {
                     let retry = self.schedule_backoff();
                     self.set(ConnectionStatus::PhoneUnreachable {
-                        detail: format!("{} is offline on your tailnet (Tailscale off, no signal, or asleep)", phone.name),
+                        detail: format!(
+                            "{} is offline on your tailnet (Tailscale off, no signal, or asleep)",
+                            phone.name
+                        ),
                         retry_in_secs: retry,
                     });
                     return;
@@ -408,7 +473,9 @@ impl Actor {
             }
         }
 
-        self.set(ConnectionStatus::Connecting { attempt: self.attempt });
+        self.set(ConnectionStatus::Connecting {
+            attempt: self.attempt,
+        });
         let target = SocketAddr::new(phone.ip, self.cfg.phone_adb_port);
 
         // Probe first: tells "rebooted" (refused) apart from "unreachable".
@@ -417,17 +484,25 @@ impl Actor {
             Ok(Err(DialError::Refused)) => {
                 let retry = self.schedule_backoff().max(5);
                 self.next_try = Some(Instant::now() + Duration::from_secs(retry));
-                self.set(ConnectionStatus::PhoneNeedsUsb { retry_in_secs: retry });
+                self.set(ConnectionStatus::PhoneNeedsUsb {
+                    retry_in_secs: retry,
+                });
                 return;
             }
             Ok(Err(e)) => {
                 let retry = self.schedule_backoff();
-                self.set(ConnectionStatus::PhoneUnreachable { detail: format!("{target}: {e}"), retry_in_secs: retry });
+                self.set(ConnectionStatus::PhoneUnreachable {
+                    detail: format!("{target}: {e}"),
+                    retry_in_secs: retry,
+                });
                 return;
             }
             Err(_) => {
                 let retry = self.schedule_backoff();
-                self.set(ConnectionStatus::PhoneUnreachable { detail: format!("{target}: timed out"), retry_in_secs: retry });
+                self.set(ConnectionStatus::PhoneUnreachable {
+                    detail: format!("{target}: timed out"),
+                    retry_in_secs: retry,
+                });
                 return;
             }
         }
@@ -476,17 +551,27 @@ impl Actor {
 
     fn fail_retry(&mut self, reason: String) {
         let retry = self.schedule_backoff();
-        self.set(ConnectionStatus::Reconnecting { attempt: self.attempt, retry_in_secs: retry, reason });
+        self.set(ConnectionStatus::Reconnecting {
+            attempt: self.attempt,
+            retry_in_secs: retry,
+            reason,
+        });
     }
 
     /// While connected: is the device still there (and, if `deep`, responsive)?
     async fn check_alive(&mut self, deep: bool) {
-        let Some(serial) = self.serial.clone() else { return };
+        let Some(serial) = self.serial.clone() else {
+            return;
+        };
         let state = self.adb.get_state(&serial).await;
         let ok = match state {
             Ok(Some(DeviceState::Device)) => {
                 if deep {
-                    match self.adb.shell(&serial, "echo pb-alive", self.cfg.probe_timeout).await {
+                    match self
+                        .adb
+                        .shell(&serial, "echo pb-alive", self.cfg.probe_timeout)
+                        .await
+                    {
                         Ok(out) if out.contains("pb-alive") => true,
                         Ok(out) => {
                             tracing::warn!("liveness check got {out:?}");
@@ -522,7 +607,11 @@ impl Actor {
         }
         self.attempt = 0;
         self.schedule(Duration::ZERO);
-        self.set(ConnectionStatus::Reconnecting { attempt: 0, retry_in_secs: 0, reason });
+        self.set(ConnectionStatus::Reconnecting {
+            attempt: 0,
+            retry_in_secs: 0,
+            reason,
+        });
     }
 
     async fn drop_device(&mut self) {
@@ -547,7 +636,9 @@ fn tailnet_detail(state: &TailnetState) -> String {
     match state {
         TailnetState::Starting => "Tailnet starting…".into(),
         TailnetState::NeedsLogin { .. } => "Log in to Tailscale".into(),
-        TailnetState::NeedsMachineAuth => "This Mac is waiting for approval in the Tailscale admin console".into(),
+        TailnetState::NeedsMachineAuth => {
+            "This Mac is waiting for approval in the Tailscale admin console".into()
+        }
         TailnetState::Running => "Online".into(),
         TailnetState::Stopped => "Tailnet stopped".into(),
         TailnetState::Error { message } => format!("Tailnet error: {message}"),

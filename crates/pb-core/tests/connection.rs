@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pb_core::adb::Adb;
-use pb_core::connection::{self, ConnectionConfig, ConnectionHandle, ConnectionStatus, PhoneConfig};
+use pb_core::connection::{
+    self, ConnectionConfig, ConnectionHandle, ConnectionStatus, PhoneConfig,
+};
 use pb_core::forwarder::{BoxFuture, BoxStream, Dialer};
 use pb_core::tailnet::{DialError, Peer, PeerLink, TailnetSnapshot, TailnetState};
 use pb_core::tools::BundledTools;
@@ -73,7 +75,9 @@ impl Dialer for ScriptedDialer {
                 DialMode::Refused => Err(DialError::Refused),
                 DialMode::Timeout => Err(DialError::Timeout),
                 DialMode::Ok => {
-                    let s = tokio::net::TcpStream::connect(sink).await.map_err(|e| DialError::Other(e.to_string()))?;
+                    let s = tokio::net::TcpStream::connect(sink)
+                        .await
+                        .map_err(|e| DialError::Other(e.to_string()))?;
                     Ok(Box::new(s) as BoxStream)
                 }
             }
@@ -112,7 +116,9 @@ fn snapshot(running: bool, phone_online: bool) -> TailnetSnapshot {
             os: "android".into(),
             ips: vec!["100.101.102.103".parse().unwrap()],
             online: phone_online,
-            link: PeerLink::Direct { addr: "203.0.113.7:41641".into() },
+            link: PeerLink::Direct {
+                addr: "203.0.113.7:41641".into(),
+            },
         });
     }
     s
@@ -133,7 +139,10 @@ impl Rig {
         let adb_path = fake_adb(&dir);
         let mut tools = BundledTools::new(&dir, &dir, 39999);
         tools.adb = adb_path;
-        let dialer = Arc::new(ScriptedDialer { mode: Mutex::new(mode), sink: sink_server().await });
+        let dialer = Arc::new(ScriptedDialer {
+            mode: Mutex::new(mode),
+            sink: sink_server().await,
+        });
         let (tx, rx) = watch::channel(snapshot(running, online));
         let cfg = ConnectionConfig {
             keepalive: Duration::from_millis(100),
@@ -150,7 +159,13 @@ impl Rig {
             ip: "100.101.102.103".parse::<IpAddr>().unwrap(),
         });
         let handle = connection::spawn(Adb::new(tools), dialer.clone(), rx, cfg, phone);
-        Rig { _dir: tmp, dir, dialer, tailnet: tx, handle }
+        Rig {
+            _dir: tmp,
+            dir,
+            dialer,
+            tailnet: tx,
+            handle,
+        }
     }
 
     fn set_dial(&self, m: DialMode) {
@@ -161,7 +176,11 @@ impl Rig {
         std::fs::write(self.dir.join("state"), s).unwrap();
     }
 
-    async fn wait_for(&self, what: &str, pred: impl Fn(&ConnectionStatus) -> bool) -> ConnectionStatus {
+    async fn wait_for(
+        &self,
+        what: &str,
+        pred: impl Fn(&ConnectionStatus) -> bool,
+    ) -> ConnectionStatus {
         let mut rx = self.handle.subscribe();
         let r = tokio::time::timeout(Duration::from_secs(8), async {
             loop {
@@ -175,7 +194,10 @@ impl Rig {
         .await;
         match r {
             Ok(s) => s,
-            Err(_) => panic!("timed out waiting for {what}; status is {:?}", self.handle.status()),
+            Err(_) => panic!(
+                "timed out waiting for {what}; status is {:?}",
+                self.handle.status()
+            ),
         }
     }
 }
@@ -183,16 +205,26 @@ impl Rig {
 #[tokio::test]
 async fn connects_when_everything_is_up() {
     let rig = Rig::new(true, true, DialMode::Ok, true).await;
-    let s = rig.wait_for("connected", ConnectionStatus::is_connected).await;
-    let ConnectionStatus::Connected { serial, link } = s else { unreachable!() };
+    let s = rig
+        .wait_for("connected", ConnectionStatus::is_connected)
+        .await;
+    let ConnectionStatus::Connected { serial, link } = s else {
+        unreachable!()
+    };
     assert!(serial.starts_with("127.0.0.1:"));
     assert_eq!(Some(serial.clone()), rig.handle.serial());
     assert!(matches!(link, Some(PeerLink::Direct { .. })));
-    assert_eq!(rig.handle.forwarder_port(), Some(serial.rsplit(':').next().unwrap().parse().unwrap()));
+    assert_eq!(
+        rig.handle.forwarder_port(),
+        Some(serial.rsplit(':').next().unwrap().parse().unwrap())
+    );
     rig.handle.shutdown().await;
     let calls = std::fs::read_to_string(rig.dir.join("calls")).unwrap();
     assert!(calls.contains(&format!("connect {serial}")));
-    assert!(calls.contains("kill-server"), "shutdown stops our adb server: {calls}");
+    assert!(
+        calls.contains("kill-server"),
+        "shutdown stops our adb server: {calls}"
+    );
 }
 
 #[tokio::test]
@@ -205,45 +237,65 @@ async fn no_phone_configured() {
 #[tokio::test]
 async fn refused_means_phone_needs_usb() {
     let rig = Rig::new(true, true, DialMode::Refused, true).await;
-    rig.wait_for("needs usb", |s| matches!(s, ConnectionStatus::PhoneNeedsUsb { .. })).await;
+    rig.wait_for("needs usb", |s| {
+        matches!(s, ConnectionStatus::PhoneNeedsUsb { .. })
+    })
+    .await;
     // After re-enabling adb over USB the next retry connects.
     rig.set_dial(DialMode::Ok);
     rig.handle.connect_now().await;
-    rig.wait_for("connected", ConnectionStatus::is_connected).await;
+    rig.wait_for("connected", ConnectionStatus::is_connected)
+        .await;
     rig.handle.shutdown().await;
 }
 
 #[tokio::test]
 async fn offline_peer_is_unreachable_then_recovers() {
     let rig = Rig::new(true, false, DialMode::Ok, true).await;
-    let s = rig.wait_for("unreachable", |s| matches!(s, ConnectionStatus::PhoneUnreachable { .. })).await;
+    let s = rig
+        .wait_for("unreachable", |s| {
+            matches!(s, ConnectionStatus::PhoneUnreachable { .. })
+        })
+        .await;
     if let ConnectionStatus::PhoneUnreachable { detail, .. } = s {
         assert!(detail.contains("offline"), "{detail}");
     }
     rig.tailnet.send_replace(snapshot(true, true));
-    rig.wait_for("connected", ConnectionStatus::is_connected).await;
+    rig.wait_for("connected", ConnectionStatus::is_connected)
+        .await;
     rig.handle.shutdown().await;
 }
 
 #[tokio::test]
 async fn dial_timeout_is_unreachable() {
     let rig = Rig::new(true, true, DialMode::Timeout, true).await;
-    rig.wait_for("unreachable", |s| matches!(s, ConnectionStatus::PhoneUnreachable { .. })).await;
+    rig.wait_for("unreachable", |s| {
+        matches!(s, ConnectionStatus::PhoneUnreachable { .. })
+    })
+    .await;
     rig.handle.shutdown().await;
 }
 
 #[tokio::test]
 async fn waits_for_tailnet_then_connects() {
     let rig = Rig::new(false, true, DialMode::Ok, true).await;
-    rig.wait_for("tailnet offline", |s| matches!(s, ConnectionStatus::TailnetOffline { .. })).await;
+    rig.wait_for("tailnet offline", |s| {
+        matches!(s, ConnectionStatus::TailnetOffline { .. })
+    })
+    .await;
     rig.tailnet.send_replace(snapshot(true, true));
-    rig.wait_for("connected", ConnectionStatus::is_connected).await;
+    rig.wait_for("connected", ConnectionStatus::is_connected)
+        .await;
     // Tailnet drops mid-session.
     rig.tailnet.send_replace(snapshot(false, true));
-    rig.wait_for("tailnet offline again", |s| matches!(s, ConnectionStatus::TailnetOffline { .. })).await;
+    rig.wait_for("tailnet offline again", |s| {
+        matches!(s, ConnectionStatus::TailnetOffline { .. })
+    })
+    .await;
     assert_eq!(rig.handle.serial(), None);
     rig.tailnet.send_replace(snapshot(true, true));
-    rig.wait_for("reconnected", ConnectionStatus::is_connected).await;
+    rig.wait_for("reconnected", ConnectionStatus::is_connected)
+        .await;
     rig.handle.shutdown().await;
 }
 
@@ -251,59 +303,76 @@ async fn waits_for_tailnet_then_connects() {
 async fn unauthorized_then_allowed() {
     let rig = Rig::new(true, true, DialMode::Ok, true).await;
     rig.set_adb_state("unauthorized");
-    rig.wait_for("unauthorized", |s| *s == ConnectionStatus::Unauthorized).await;
+    rig.wait_for("unauthorized", |s| *s == ConnectionStatus::Unauthorized)
+        .await;
     rig.set_adb_state("device");
-    rig.wait_for("connected", ConnectionStatus::is_connected).await;
+    rig.wait_for("connected", ConnectionStatus::is_connected)
+        .await;
     rig.handle.shutdown().await;
 }
 
 #[tokio::test]
 async fn device_drop_triggers_reconnect() {
     let rig = Rig::new(true, true, DialMode::Ok, true).await;
-    rig.wait_for("connected", ConnectionStatus::is_connected).await;
+    rig.wait_for("connected", ConnectionStatus::is_connected)
+        .await;
     // adb reports the device gone (e.g. transport died).
     std::fs::remove_file(rig.dir.join("connected")).unwrap();
     rig.wait_for("reconnecting", |s| !s.is_connected()).await;
-    rig.wait_for("connected again", ConnectionStatus::is_connected).await;
+    rig.wait_for("connected again", ConnectionStatus::is_connected)
+        .await;
     rig.handle.shutdown().await;
 }
 
 #[tokio::test]
 async fn unresponsive_phone_detected_by_liveness_and_reboot_detected() {
     let rig = Rig::new(true, true, DialMode::Ok, true).await;
-    rig.wait_for("connected", ConnectionStatus::is_connected).await;
+    rig.wait_for("connected", ConnectionStatus::is_connected)
+        .await;
     // Phone reboots: shell stops answering, and 5555 now refuses.
     std::fs::write(rig.dir.join("shell_fail"), "").unwrap();
     rig.set_dial(DialMode::Refused);
-    rig.wait_for("needs usb", |s| matches!(s, ConnectionStatus::PhoneNeedsUsb { .. })).await;
+    rig.wait_for("needs usb", |s| {
+        matches!(s, ConnectionStatus::PhoneNeedsUsb { .. })
+    })
+    .await;
     rig.handle.shutdown().await;
 }
 
 #[tokio::test]
 async fn disconnect_and_reconnect_on_request() {
     let rig = Rig::new(true, true, DialMode::Ok, true).await;
-    rig.wait_for("connected", ConnectionStatus::is_connected).await;
+    rig.wait_for("connected", ConnectionStatus::is_connected)
+        .await;
     rig.handle.disconnect().await;
-    rig.wait_for("disconnected", |s| *s == ConnectionStatus::Disconnected).await;
+    rig.wait_for("disconnected", |s| *s == ConnectionStatus::Disconnected)
+        .await;
     // Stays disconnected (no auto-reconnect after an explicit disconnect).
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(rig.handle.status(), ConnectionStatus::Disconnected);
     rig.handle.connect_now().await;
-    rig.wait_for("connected", ConnectionStatus::is_connected).await;
+    rig.wait_for("connected", ConnectionStatus::is_connected)
+        .await;
     rig.handle.shutdown().await;
 }
 
 #[tokio::test]
 async fn ip_change_is_followed() {
     let rig = Rig::new(true, true, DialMode::Ok, true).await;
-    rig.wait_for("connected", ConnectionStatus::is_connected).await;
+    rig.wait_for("connected", ConnectionStatus::is_connected)
+        .await;
     let mut snap = snapshot(true, true);
     snap.peers[0].ips = vec!["100.64.9.9".parse().unwrap()];
     rig.handle.disconnect().await;
-    rig.wait_for("disconnected", |s| *s == ConnectionStatus::Disconnected).await;
+    rig.wait_for("disconnected", |s| *s == ConnectionStatus::Disconnected)
+        .await;
     rig.tailnet.send_replace(snap);
     rig.handle.connect_now().await;
-    rig.wait_for("connected", ConnectionStatus::is_connected).await;
-    assert_eq!(rig.handle.phone().unwrap().ip, "100.64.9.9".parse::<IpAddr>().unwrap());
+    rig.wait_for("connected", ConnectionStatus::is_connected)
+        .await;
+    assert_eq!(
+        rig.handle.phone().unwrap().ip,
+        "100.64.9.9".parse::<IpAddr>().unwrap()
+    );
     rig.handle.shutdown().await;
 }

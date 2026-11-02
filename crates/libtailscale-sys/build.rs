@@ -29,10 +29,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let host = env::var("HOST")?;
     let vendor = manifest.join("vendor").join("libtailscale");
 
-    for f in ["tailscale.go", "tailscale.c", "tailscale.h", "fd_linux.go", "fd_other.go", "go.mod", "go.sum"] {
+    for f in [
+        "tailscale.go",
+        "tailscale.c",
+        "tailscale.h",
+        "fd_linux.go",
+        "fd_other.go",
+        "go.mod",
+        "go.sum",
+    ] {
         println!("cargo:rerun-if-changed={}", vendor.join(f).display());
     }
-    for v in ["PHONEBRIDGE_LIBTAILSCALE_A", "PHONEBRIDGE_GO", "PHONEBRIDGE_MACOS_MIN", "PHONEBRIDGE_CACHE"] {
+    for v in [
+        "PHONEBRIDGE_LIBTAILSCALE_A",
+        "PHONEBRIDGE_GO",
+        "PHONEBRIDGE_MACOS_MIN",
+        "PHONEBRIDGE_CACHE",
+    ] {
         println!("cargo:rerun-if-env-changed={v}");
     }
 
@@ -51,7 +64,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         build_archive(&go, &vendor, &out_dir, &cache, goos, goarch, is_darwin)?;
         collect_licenses(&go, &vendor, &cache, goos, goarch);
         // Exposed to dependents' build scripts as DEP_TAILSCALE_LICENSES.
-        println!("cargo:licenses={}", cache.join("licenses").join("go").display());
+        println!(
+            "cargo:licenses={}",
+            cache.join("licenses").join("go").display()
+        );
     }
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
@@ -90,7 +106,11 @@ fn go_platform(target: &str) -> Result<(&'static str, &'static str), String> {
     Ok((goos, goarch))
 }
 
-fn go_binary(pins: &fetch::Pins, host: &str, cache: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn go_binary(
+    pins: &fetch::Pins,
+    host: &str,
+    cache: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Some(go) = env::var_os("PHONEBRIDGE_GO") {
         return Ok(PathBuf::from(go));
     }
@@ -110,7 +130,13 @@ fn go_binary(pins: &fetch::Pins, host: &str, cache: &Path) -> Result<PathBuf, Bo
     Ok(go)
 }
 
-fn go_env(cmd: &mut Command, cache: &Path, goos: &str, goarch: &str, is_darwin: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn go_env(
+    cmd: &mut Command,
+    cache: &Path,
+    goos: &str,
+    goarch: &str,
+    is_darwin: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     cmd.env("GOTOOLCHAIN", "local")
         .env("GOFLAGS", "-mod=readonly")
         .env("GOPATH", cache.join("gopath"))
@@ -138,7 +164,11 @@ fn xcrun_clang() -> Result<String, Box<dyn std::error::Error>> {
     let out = Command::new("xcrun")
         .args(["--sdk", "macosx", "--find", "clang"])
         .output()
-        .map_err(|e| format!("running xcrun (install Xcode Command Line Tools: `xcode-select --install`): {e}"))?;
+        .map_err(|e| {
+            format!(
+                "running xcrun (install Xcode Command Line Tools: `xcode-select --install`): {e}"
+            )
+        })?;
     if !out.status.success() {
         return Err(format!(
             "xcrun could not find clang. Install the Xcode Command Line Tools with `xcode-select --install`.\n{}",
@@ -160,12 +190,19 @@ fn build_archive(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::new(go);
     cmd.current_dir(vendor)
-        .args(["build", "-buildmode=c-archive", "-trimpath", "-ldflags=-s -w -buildid="])
+        .args([
+            "build",
+            "-buildmode=c-archive",
+            "-trimpath",
+            "-ldflags=-s -w -buildid=",
+        ])
         .arg("-o")
         .arg(out_dir.join("libtailscale.a"))
         .arg(".");
     go_env(&mut cmd, cache, goos, goarch, is_darwin)?;
-    let out = cmd.output().map_err(|e| format!("running {}: {e}", go.display()))?;
+    let out = cmd
+        .output()
+        .map_err(|e| format!("running {}: {e}", go.display()))?;
     if !out.status.success() {
         return Err(format!(
             "`go build -buildmode=c-archive` failed ({}):\n{}{}",
@@ -202,10 +239,10 @@ fn collect_licenses(go: &Path, vendor: &Path, cache: &Path, goos: &str, goarch: 
         let mut modules = BTreeMap::new();
         for line in String::from_utf8(out.stdout)?.lines() {
             let mut parts = line.split('\t');
-            if let (Some(path), Some(ver), Some(dir)) = (parts.next(), parts.next(), parts.next()) {
-                if !dir.is_empty() {
-                    modules.insert(path.to_string(), (ver.to_string(), PathBuf::from(dir)));
-                }
+            if let (Some(path), Some(ver), Some(dir)) = (parts.next(), parts.next(), parts.next())
+                && !dir.is_empty()
+            {
+                modules.insert(path.to_string(), (ver.to_string(), PathBuf::from(dir)));
             }
         }
         if dest.exists() {
@@ -219,9 +256,14 @@ fn collect_licenses(go: &Path, vendor: &Path, cache: &Path, goos: &str, goarch: 
             fs::copy(lic, dest.join("go-stdlib.LICENSE.txt"))?;
         }
 
-        let mut index = String::from("Go modules statically linked into PhoneBridge (via libtailscale):\n\n");
+        let mut index =
+            String::from("Go modules statically linked into PhoneBridge (via libtailscale):\n\n");
         for (path, (ver, dir)) in &modules {
-            let ver = if ver.is_empty() { "(main module)" } else { ver.as_str() };
+            let ver = if ver.is_empty() {
+                "(main module)"
+            } else {
+                ver.as_str()
+            };
             index.push_str(&format!("{path} {ver}\n"));
             let safe = path.replace('/', "_");
             for entry in fs::read_dir(dir)?.flatten() {
@@ -230,7 +272,11 @@ fn collect_licenses(go: &Path, vendor: &Path, cache: &Path, goos: &str, goarch: 
                 }
                 let name = entry.file_name().to_string_lossy().to_string();
                 let upper = name.to_ascii_uppercase();
-                if upper.starts_with("LICENSE") || upper.starts_with("COPYING") || upper.starts_with("NOTICE") || upper == "PATENTS" {
+                if upper.starts_with("LICENSE")
+                    || upper.starts_with("COPYING")
+                    || upper.starts_with("NOTICE")
+                    || upper == "PATENTS"
+                {
                     fs::copy(entry.path(), dest.join(format!("{safe}.{name}.txt")))?;
                 }
             }

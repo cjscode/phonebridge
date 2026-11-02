@@ -1,6 +1,31 @@
 [package]
 name = "phonebridge"
+description = "Control your Android phone from your Mac over your tailnet"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+default-run = "phonebridge"
+
+[[bin]]
+name = "phonebridge"
+path = "src/main.rs"
+
+[build-dependencies]
+fetch.workspace = true
+tauri-build = { version = "2.7.4", features = [] }
+
+[dependencies]
+# Direct dependency so build.rs receives DEP_TAILSCALE_LICENSES (and runs after it).
+libtailscale-sys.workspace = true
+pb-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2.12.5", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "2.7.2"
+tauri-plugin-single-instance = "2.5.5"
+tauri-plugin-store = "2.5.0"
+tokio.workspace = true
+tracing.workspace = true
+tracing-appender = "0.2"
+tracing-subscriber.workspace = true

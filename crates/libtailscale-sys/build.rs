@@ -50,6 +50,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let go = go_binary(&pins, &host, &cache)?;
         build_archive(&go, &vendor, &out_dir, &cache, goos, goarch, is_darwin)?;
         collect_licenses(&go, &vendor, &cache, goos, goarch);
+        // Exposed to dependents' build scripts as DEP_TAILSCALE_LICENSES.
+        println!("cargo:licenses={}", cache.join("licenses").join("go").display());
     }
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
@@ -99,7 +101,6 @@ fn go_binary(pins: &fetch::Pins, host: &str, cache: &Path) -> Result<PathBuf, Bo
         .archives
         .get(&key)
         .ok_or_else(|| format!("deps.toml has no Go archive for build host {key}"))?;
-    println!("cargo:warning=Using Go {} (build-time only, cached in {})", pins.go.version, cache.display());
     let file = fetch::fetch(archive, cache)?;
     let dir = fetch::extract_once(&file, cache, &format!("go-{}-{key}", pins.go.version))?;
     let go = dir.join("go").join("bin").join("go");

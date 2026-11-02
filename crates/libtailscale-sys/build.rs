@@ -150,14 +150,50 @@ fn go_env(
     if is_darwin {
         let min = env::var("PHONEBRIDGE_MACOS_MIN").unwrap_or_else(|_| "13.0".into());
         let clang = xcrun_clang()?;
+        // Calling clang by its full path (instead of the /usr/bin/clang shim)
+        // skips xcrun's SDK lookup, so the system headers (stdlib.h, pthread.h)
+        // aren't found. Pass the SDK explicitly.
+        let sdk = macos_sdk()?;
         let arch = if goarch == "arm64" { "arm64" } else { "x86_64" };
-        let flags = format!("-arch {arch} -mmacosx-version-min={min}");
+        let flags = format!("-arch {arch} -mmacosx-version-min={min} -isysroot {sdk}");
         cmd.env("CC", clang)
+            .env("SDKROOT", &sdk)
             .env("CGO_CFLAGS", format!("-O2 {flags}"))
             .env("CGO_LDFLAGS", &flags)
             .env("MACOSX_DEPLOYMENT_TARGET", &min);
     }
     Ok(())
+}
+
+/// Path of the macOS SDK (`SDKROOT` if set, else `xcrun --show-sdk-path`).
+fn macos_sdk() -> Result<String, Box<dyn std::error::Error>> {
+    println!("cargo:rerun-if-env-changed=SDKROOT");
+    if let Ok(sdk) = env::var("SDKROOT")
+        && Path::new(&sdk).is_dir()
+    {
+        return Ok(sdk);
+    }
+    let out = Command::new("xcrun")
+        .args(["--sdk", "macosx", "--show-sdk-path"])
+        .output()
+        .map_err(|e| format!("running xcrun --show-sdk-path: {e}"))?;
+    let sdk = String::from_utf8(out.stdout)?.trim().to_string();
+    if !out.status.success() || sdk.is_empty() || !Path::new(&sdk).is_dir() {
+        return Err(format!(
+            "Couldn't find the macOS SDK. Reinstall the Xcode Command Line Tools:\n  \
+             sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+        .into());
+    }
+    if sdk.contains(' ') {
+        // CGO_CFLAGS is split on spaces; a quoted path isn't supported there.
+        return Err(format!(
+            "macOS SDK path contains a space, which cgo flags can't handle: {sdk}"
+        )
+        .into());
+    }
+    Ok(sdk)
 }
 
 fn xcrun_clang() -> Result<String, Box<dyn std::error::Error>> {

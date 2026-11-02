@@ -86,6 +86,11 @@ fn doctor() -> R {
         "xcode-select --install",
     );
     check(
+        "macOS SDK",
+        run(Command::new("xcrun").args(["--sdk", "macosx", "--show-sdk-path"])),
+        "sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install",
+    );
+    check(
         "curl",
         run(Command::new("curl").arg("--version")),
         "curl ships with macOS",

@@ -103,7 +103,8 @@ impl ProcessRegistry {
             .map(|e| e.info.clone())
     }
 
-    /// Spawn `cmd` as a tracked window.
+    /// Spawn `cmd` as a tracked window. Must run inside a Tokio runtime
+    /// (on a worker, or with `Handle::enter()` from another thread).
     pub fn spawn(
         self: &Arc<Self>,
         mut cmd: Command,
@@ -301,6 +302,33 @@ fn exe_of(pid: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The app starts windows from the macOS main thread, which only has the
+    /// runtime entered (not a worker). That must work.
+    #[test]
+    fn spawn_from_a_thread_that_entered_the_runtime() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let handle = rt.handle().clone();
+        let reg = ProcessRegistry::new(None, Path::new("/bin/sh"));
+        let mut events = reg.subscribe();
+        let reg2 = reg.clone();
+        std::thread::spawn(move || {
+            let _in_runtime = handle.enter();
+            let mut cmd = Command::new("/bin/sh");
+            cmd.args(["-c", "exit 0"]);
+            reg2.spawn(cmd, "Mirror".into(), None).unwrap();
+        })
+        .join()
+        .expect("spawning from a non-worker thread must not panic");
+        // The exit is only seen if the watcher task runs on the runtime.
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !matches!(events.recv().await, Ok(ProcEvent::Exited { .. })) {}
+            })
+            .await
+            .expect("window exit reported");
+        });
+    }
 
     #[tokio::test]
     async fn spawn_exit_and_stderr_tail() {

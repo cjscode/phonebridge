@@ -335,7 +335,13 @@ pub async fn list_apps(
 }
 
 /// Start a scrcpy window (shared by the UI and the tray).
+///
+/// Called from the main thread (sync commands and tray clicks), which isn't a
+/// Tokio thread. Starting and watching the process needs the runtime, so enter
+/// it here; without this, spawning panics and the app aborts.
 pub fn launch(state: &SharedState, mode: LaunchMode) -> Res<WindowInfo> {
+    let rt = tauri::async_runtime::handle();
+    let _in_runtime = rt.inner().enter();
     if let Some(e) = &state.tools_error {
         return Err(e.clone());
     }

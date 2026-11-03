@@ -1,6 +1,6 @@
 [package]
 name = "phonebridge"
-description = "Control your Android phone from your Mac over NetBird"
+description = "Control your Android phone from your Mac over NetBird or Tailscale"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,8 +16,8 @@ fetch.workspace = true
 tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
-# Direct dependency so build.rs receives DEP_NETBIRD_LICENSES (and runs after it).
-netbird-sys.workspace = true
+# Direct dependency so build.rs receives DEP_OVERLAY_LICENSES (and runs after it).
+overlay-sys.workspace = true
 pb-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

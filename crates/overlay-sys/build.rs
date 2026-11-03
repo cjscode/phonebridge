@@ -1,12 +1,13 @@
-//! Builds `libnetbird.a` from `go/` (PhoneBridge's C wrapper around NetBird's
-//! `client/embed`) with `go build -buildmode=c-archive`.
+//! Builds `liboverlay.a` from `go/` (PhoneBridge's C wrapper around NetBird's
+//! `client/embed` and Tailscale's `tsnet`) with `go build -buildmode=c-archive`.
+//! Both live in one archive because a program can only contain one Go runtime.
 //!
 //! Go is a *build-time only* dependency, and you don't install it: the toolchain
 //! pinned in `deps.toml` is downloaded (SHA-256 checked) into the build cache.
 //! Go modules are verified against `go/go.sum`.
 //!
 //! Overrides:
-//! - `PHONEBRIDGE_NETBIRD_A=/path/libnetbird.a`  link a prebuilt archive, skip Go entirely
+//! - `PHONEBRIDGE_OVERLAY_A=/path/liboverlay.a`  link a prebuilt archive, skip Go entirely
 //! - `PHONEBRIDGE_GO=/path/to/go`                use this `go` binary instead of downloading one
 //! - `PHONEBRIDGE_MACOS_MIN=13.0`                deployment target (Go 1.27 needs >= 13.0)
 
@@ -19,7 +20,7 @@ use std::process::Command;
 fn main() {
     if let Err(e) = run() {
         // cargo shows build-script stderr on failure; make the cause obvious.
-        eprintln!("\nnetbird-sys build failed:\n{e}\n");
+        eprintln!("\noverlay-sys build failed:\n{e}\n");
         std::process::exit(1);
     }
 }
@@ -31,11 +32,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let host = env::var("HOST")?;
     let vendor = manifest.join("go");
 
-    for f in ["shim.go", "go.mod", "go.sum"] {
+    for f in [
+        "common.go",
+        "netbird.go",
+        "tailscale.go",
+        "go.mod",
+        "go.sum",
+    ] {
         println!("cargo:rerun-if-changed={}", vendor.join(f).display());
     }
     for v in [
-        "PHONEBRIDGE_NETBIRD_A",
+        "PHONEBRIDGE_OVERLAY_A",
         "PHONEBRIDGE_GO",
         "PHONEBRIDGE_MACOS_MIN",
         "PHONEBRIDGE_CACHE",
@@ -46,9 +53,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (goos, goarch) = go_platform(&target)?;
     let is_darwin = goos == "darwin";
 
-    if let Some(prebuilt) = env::var_os("PHONEBRIDGE_NETBIRD_A") {
+    if let Some(prebuilt) = env::var_os("PHONEBRIDGE_OVERLAY_A") {
         let prebuilt = PathBuf::from(prebuilt);
-        fs::copy(&prebuilt, out_dir.join("libnetbird.a"))
+        fs::copy(&prebuilt, out_dir.join("liboverlay.a"))
             .map_err(|e| format!("copying {}: {e}", prebuilt.display()))?;
     } else {
         let workspace = fetch::workspace_root(&manifest)?;
@@ -57,7 +64,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let go = go_binary(&pins, &host, &cache)?;
         build_archive(&go, &vendor, &out_dir, &cache, goos, goarch, is_darwin)?;
         collect_licenses(&go, &vendor, &cache, goos, goarch);
-        // Exposed to dependents' build scripts as DEP_NETBIRD_LICENSES.
+        // Exposed to dependents' build scripts as DEP_OVERLAY_LICENSES.
         println!(
             "cargo:licenses={}",
             cache.join("licenses").join("go").display()
@@ -65,7 +72,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
-    println!("cargo:rustc-link-lib=static=netbird");
+    println!("cargo:rustc-link-lib=static=overlay");
     if is_darwin {
         // From the `go:cgo_import_dynamic` directives in the darwin dependency
         // tree: CoreFoundation and Security (crypto/x509 etc.) and libresolv.
@@ -227,7 +234,7 @@ fn build_archive(
             "-ldflags=-s -w -buildid=",
         ])
         .arg("-o")
-        .arg(out_dir.join("libnetbird.a"))
+        .arg(out_dir.join("liboverlay.a"))
         .arg(".");
     go_env(&mut cmd, cache, goos, goarch, is_darwin)?;
     let out = cmd
@@ -246,7 +253,7 @@ fn build_archive(
 }
 
 /// Copy LICENSE files of the Go standard library and every Go module linked into
-/// libnetbird to `<cache>/licenses/go/`, which the app bundles. Best effort:
+/// liboverlay to `<cache>/licenses/go/`, which the app bundles. Best effort:
 /// a failure here warns instead of failing the build.
 fn collect_licenses(go: &Path, vendor: &Path, cache: &Path, goos: &str, goarch: &str) {
     let dest = cache.join("licenses").join("go");
@@ -286,8 +293,9 @@ fn collect_licenses(go: &Path, vendor: &Path, cache: &Path, goos: &str, goarch: 
             fs::copy(lic, dest.join("go-stdlib.LICENSE.txt"))?;
         }
 
-        let mut index =
-            String::from("Go modules statically linked into PhoneBridge (via NetBird):\n\n");
+        let mut index = String::from(
+            "Go modules statically linked into PhoneBridge (via NetBird and Tailscale):\n\n",
+        );
         for (path, (ver, dir)) in &modules {
             let ver = if ver.is_empty() {
                 "(main module)"

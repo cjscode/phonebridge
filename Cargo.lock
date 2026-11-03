@@ -2147,13 +2147,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "netbird-sys"
-version = "0.1.0"
-dependencies = [
- "fetch",
-]
-
-[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2435,6 +2428,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "overlay-sys"
+version = "0.1.0"
+dependencies = [
+ "fetch",
+]
+
+[[package]]
 name = "pango"
 version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2494,7 +2494,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "libc",
- "netbird-sys",
+ "overlay-sys",
  "serde",
  "serde_json",
  "tempfile",
@@ -2568,7 +2568,7 @@ name = "phonebridge"
 version = "0.1.0"
 dependencies = [
  "fetch",
- "netbird-sys",
+ "overlay-sys",
  "pb-core",
  "serde",
  "serde_json",

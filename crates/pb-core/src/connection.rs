@@ -1,7 +1,7 @@
-//! Keeps the saved phone connected: NetBird → forwarder → `adb connect`, with
+//! Keeps the saved phone connected: overlay network → forwarder → `adb connect`, with
 //! liveness checks, reconnect-with-backoff, and a status the UI can explain.
 //!
-//! Everything runs in one task (an actor), driven by: user commands, NetBird
+//! Everything runs in one task (an actor), driven by: user commands, network
 //! snapshot changes, forwarder events, a keepalive tick, and a retry timer.
 
 use std::net::{IpAddr, SocketAddr};
@@ -14,15 +14,15 @@ use tokio::time::Instant;
 
 use crate::adb::{Adb, DeviceState};
 use crate::forwarder::{Dialer, Forwarder, ForwarderEvent, ForwarderStats, bind_loopback};
-use crate::overlay::{DialError, NetSnapshot, NetState, PeerLink};
+use crate::overlay::{DialError, NetSnapshot, NetState, Network, PeerLink};
 
 /// The phone we remember between launches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhoneConfig {
-    /// Stable NetBird peer ID (its WireGuard public key).
+    /// Stable peer ID (NetBird: WireGuard public key; Tailscale: stable node ID).
     pub node_id: String,
     pub name: String,
-    /// Last known NetBird IP; refreshed from NetBird when it changes.
+    /// Last known overlay IP; refreshed from the network when it changes.
     pub ip: IpAddr,
 }
 
@@ -31,7 +31,7 @@ pub struct PhoneConfig {
 pub enum ConnectionStatus {
     /// Nothing set up yet; run "Set up via USB".
     NoPhone,
-    /// Our NetBird client isn't running (logged out, starting, Mac offline).
+    /// Our NetBird/Tailscale client isn't running (logged out, starting, Mac offline).
     NetOffline {
         detail: String,
     },
@@ -53,7 +53,7 @@ pub enum ConnectionStatus {
     PhoneNeedsUsb {
         retry_in_secs: u64,
     },
-    /// The phone can't be reached over NetBird (offline, asleep, NetBird off).
+    /// The phone can't be reached over the network (offline, asleep, VPN app off).
     PhoneUnreachable {
         detail: String,
         retry_in_secs: u64,
@@ -73,7 +73,7 @@ impl ConnectionStatus {
     pub fn summary(&self) -> String {
         match self {
             Self::NoPhone => "No phone set up".into(),
-            Self::NetOffline { .. } => "NetBird offline".into(),
+            Self::NetOffline { .. } => "Network offline".into(),
             Self::Connecting { .. } => "Connecting…".into(),
             Self::Connected {
                 link: Some(PeerLink::Direct { .. }),
@@ -86,7 +86,7 @@ impl ConnectionStatus {
             Self::Connected { .. } => "Connected".into(),
             Self::Reconnecting { .. } => "Reconnecting…".into(),
             Self::PhoneNeedsUsb { .. } => "Phone rebooted: plug in USB once".into(),
-            Self::PhoneUnreachable { .. } => "Phone not reachable over NetBird".into(),
+            Self::PhoneUnreachable { .. } => "Phone not reachable".into(),
             Self::Unauthorized => "Allow USB debugging on the phone".into(),
             Self::Disconnected => "Disconnected".into(),
         }
@@ -190,7 +190,10 @@ impl ConnectionHandle {
             .map(|f| f.stats())
     }
 
+    /// Change the saved phone. `phone()` reflects it right away (the actor
+    /// then reconnects), so callers persisting it never see the old one.
     pub async fn set_phone(&self, phone: Option<PhoneConfig>) {
+        *self.shared.phone.lock().unwrap() = phone.clone();
         let _ = self.cmd.send(Cmd::SetPhone(phone)).await;
     }
 
@@ -375,14 +378,14 @@ impl Actor {
                 self.drop_device().await;
             }
             if self.want_connected && self.phone.is_some() {
-                self.next_try = None; // wait for the NetBird to come back
+                self.next_try = None; // wait for the network to come back
                 self.set(ConnectionStatus::NetOffline {
-                    detail: net_detail(&snap.state),
+                    detail: net_detail(snap.kind, &snap.state),
                 });
             }
             return;
         }
-        // NetBird is up: if we were waiting on it, try now.
+        // The network is up: if we were waiting on it, try now.
         if self.want_connected
             && self.phone.is_some()
             && self.serial.is_none()
@@ -433,14 +436,14 @@ impl Actor {
         let snap = self.net.borrow().clone();
         if !snap.is_running() {
             self.set(ConnectionStatus::NetOffline {
-                detail: net_detail(&snap.state),
+                detail: net_detail(snap.kind, &snap.state),
             });
             return; // on_net_change will retry
         }
 
         match snap.peer_by_id(&phone.node_id) {
             None if !snap.synced => {
-                // NetBird hasn't received its peer list yet; check again shortly.
+                // The network hasn't sent its peer list yet; check again shortly.
                 self.set(ConnectionStatus::Connecting {
                     attempt: self.attempt,
                 });
@@ -450,7 +453,10 @@ impl Actor {
             None => {
                 let retry = self.schedule_backoff();
                 self.set(ConnectionStatus::PhoneUnreachable {
-                    detail: format!("{} isn't in your NetBird network any more (removed, or blocked by an access policy)", phone.name),
+                    detail: format!(
+                        "{} isn't in your {} network any more (removed, or blocked by an access policy)",
+                        phone.name, snap.kind
+                    ),
                     retry_in_secs: retry,
                 });
                 return;
@@ -462,22 +468,23 @@ impl Actor {
                     .or_else(|| peer.ips.first().copied())
                     && ip != phone.ip
                 {
-                    tracing::info!("phone NetBird IP changed {} -> {ip}", phone.ip);
+                    tracing::info!("phone {} IP changed {} -> {ip}", snap.kind, phone.ip);
                     phone.ip = ip;
                     self.phone = Some(phone.clone());
                     *self.shared.phone.lock().unwrap() = Some(phone.clone());
                 }
             }
         }
-        // NetBird has no "peer online" flag, so always try; the peer's
-        // connection state only helps explain a failure.
+        // Peers' online flags lag (NetBird has none until connected; Tailscale
+        // connects on demand), so always try; the flag only helps explain a failure.
         let peer_connected = snap.peer_by_id(&phone.node_id).is_some_and(|p| p.online);
+        let net = snap.kind;
         let unreachable_detail = |e: &str| {
             if peer_connected {
                 format!("{}: {e}", phone.name)
             } else {
                 format!(
-                    "{} isn't connected to NetBird ({e}). Is NetBird on the phone switched on and does the phone have signal?",
+                    "{} isn't connected to {net} ({e}). Is {net} on the phone switched on and does the phone have signal?",
                     phone.name
                 )
             }
@@ -642,13 +649,13 @@ impl Actor {
     }
 }
 
-fn net_detail(state: &NetState) -> String {
+fn net_detail(net: Network, state: &NetState) -> String {
     match state {
-        NetState::Starting => "NetBird starting…".into(),
-        NetState::NeedsLogin { .. } => "Log in to NetBird".into(),
+        NetState::Starting => format!("{net} starting…"),
+        NetState::NeedsLogin { .. } => format!("Log in to {net}"),
         NetState::Running => "Online".into(),
-        NetState::Stopped => "NetBird stopped".into(),
-        NetState::Error { message, .. } => format!("NetBird error: {message}"),
+        NetState::Stopped => format!("{net} stopped"),
+        NetState::Error { message, .. } => format!("{net} error: {message}"),
     }
 }
 

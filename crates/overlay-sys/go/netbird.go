@@ -1,12 +1,7 @@
-// PhoneBridge's C interface to the NetBird client (github.com/netbirdio/netbird/client/embed).
+// NetBird half of the overlay shim (see common.go for conventions).
 //
-// Built with `go build -buildmode=c-archive` into libnetbird.a and linked into
-// the Rust app. NetBird runs in userspace (netstack): no VPN, no system DNS or
-// routes, no admin rights.
-//
-// Conventions: functions return 0 on success and -1 on error. On error,
-// *err_out (when non-NULL) receives a malloc'd message the caller frees with
-// nb_free. Strings returned through *_out parameters are also freed with nb_free.
+// Wraps github.com/netbirdio/netbird/client/embed: login (setup key, browser
+// SSO via PKCE or device code, or the saved key), status, dial and logout.
 package main
 
 /*
@@ -24,16 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"html"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
-	"sync"
-	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/netbirdio/netbird/client/embed"
 	mgm "github.com/netbirdio/netbird/shared/management/client"
@@ -41,32 +32,10 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-func main() {}
-
 var (
-	mu      sync.Mutex
-	nextID  C.int = 1
-	clients       = map[C.int]*embed.Client{}
-	flows         = map[C.int]*ssoFlow{}
+	clients = map[C.int]*embed.Client{}
+	flows   = map[C.int]*ssoFlow{}
 )
-
-func fail(errOut **C.char, err error) C.int {
-	if errOut != nil {
-		*errOut = C.CString(err.Error())
-	}
-	return -1
-}
-
-func putString(out **C.char, s string) {
-	if out != nil {
-		*out = C.CString(s)
-	}
-}
-
-//export nb_free
-func nb_free(p *C.char) {
-	C.free(unsafe.Pointer(p))
-}
 
 func getClient(h C.int) (*embed.Client, error) {
 	mu.Lock()
@@ -119,10 +88,7 @@ func nb_new(optsJSON *C.char, errOut **C.char) C.int {
 	if err := json.Unmarshal([]byte(C.GoString(optsJSON)), &o); err != nil {
 		return fail(errOut, fmt.Errorf("bad options: %w", err))
 	}
-	var logOut io.Writer = io.Discard
-	if o.LogFD >= 0 {
-		logOut = os.NewFile(uintptr(o.LogFD), "netbird-log")
-	}
+	logOut := logWriter(o.LogFD, "netbird-log")
 	lazy := false // connect to peers eagerly, so their status means something
 	wgPort := 0   // random UDP port: never clash with an installed NetBird agent
 	opts := embed.Options{
@@ -156,8 +122,7 @@ func nb_new(optsJSON *C.char, errOut **C.char) C.int {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	h := nextID
-	nextID++
+	h := newHandle()
 	clients[h] = c
 	return h
 }
@@ -199,51 +164,6 @@ func nb_stop(h C.int, errOut **C.char) C.int {
 
 // ---- status -----------------------------------------------------------------
 
-type peerJSON struct {
-	PubKey         string `json:"pub_key"`
-	IP             string `json:"ip"`
-	IPv6           string `json:"ipv6"`
-	FQDN           string `json:"fqdn"`
-	ConnStatus     string `json:"conn_status"`
-	Relayed        bool   `json:"relayed"`
-	LocalEndpoint  string `json:"local_endpoint"`
-	RemoteEndpoint string `json:"remote_endpoint"`
-	RelayAddress   string `json:"relay_address"`
-	LatencyMs      int64  `json:"latency_ms"`
-	LastHandshake  int64  `json:"last_handshake_unix"`
-	BytesRx        int64  `json:"bytes_rx"`
-	BytesTx        int64  `json:"bytes_tx"`
-}
-
-type statusJSON struct {
-	// Synced is true once the first network map arrived from management;
-	// before that the peer list is incomplete.
-	Synced              bool       `json:"synced"`
-	ManagementURL       string     `json:"management_url"`
-	ManagementConnected bool       `json:"management_connected"`
-	ManagementError     string     `json:"management_error"`
-	SignalConnected     bool       `json:"signal_connected"`
-	LocalIP             string     `json:"local_ip"`
-	LocalIPv6           string     `json:"local_ipv6"`
-	LocalFQDN           string     `json:"local_fqdn"`
-	LocalPubKey         string     `json:"local_pub_key"`
-	Peers               []peerJSON `json:"peers"`
-}
-
-func errString(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
-
-func unixOrZero(t time.Time) int64 {
-	if t.IsZero() {
-		return 0
-	}
-	return t.Unix()
-}
-
 //export nb_status_json
 func nb_status_json(h C.int, out **C.char, errOut **C.char) C.int {
 	c, err := getClient(h)
@@ -254,11 +174,12 @@ func nb_status_json(h C.int, out **C.char, errOut **C.char) C.int {
 	if err != nil {
 		return fail(errOut, err)
 	}
+	mgmtUp, signalUp := st.ManagementState.Connected, st.SignalState.Connected
 	s := statusJSON{
 		ManagementURL:       st.ManagementState.URL,
-		ManagementConnected: st.ManagementState.Connected,
+		ManagementConnected: &mgmtUp,
 		ManagementError:     errString(st.ManagementState.Error),
-		SignalConnected:     st.SignalState.Connected,
+		SignalConnected:     &signalUp,
 		LocalIP:             st.LocalPeerState.IP,
 		LocalIPv6:           st.LocalPeerState.IPv6,
 		LocalFQDN:           st.LocalPeerState.FQDN,
@@ -269,7 +190,7 @@ func nb_status_json(h C.int, out **C.char, errOut **C.char) C.int {
 	for _, p := range st.Peers {
 		seen[p.PubKey] = true
 		s.Peers = append(s.Peers, peerJSON{
-			PubKey:         p.PubKey,
+			ID:             p.PubKey,
 			IP:             p.IP,
 			IPv6:           p.IPv6,
 			FQDN:           p.FQDN,
@@ -298,7 +219,7 @@ func nb_status_json(h C.int, out **C.char, errOut **C.char) C.int {
 			if ips := rp.GetAllowedIps(); len(ips) > 0 {
 				ip = ips[0]
 			}
-			s.Peers = append(s.Peers, peerJSON{PubKey: key, IP: ip, FQDN: rp.GetFqdn(), ConnStatus: "Idle"})
+			s.Peers = append(s.Peers, peerJSON{ID: key, IP: ip, FQDN: rp.GetFqdn(), ConnStatus: "Idle"})
 		}
 	}
 	data, err := json.Marshal(s)
@@ -326,46 +247,12 @@ func nb_dial(h C.int, network, addr *C.char, timeoutMs C.int, fdOut *C.int, errO
 	if err != nil {
 		return fail(errOut, err)
 	}
-	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	fd, err := connToFD(conn)
 	if err != nil {
-		conn.Close()
-		return fail(errOut, fmt.Errorf("socketpair: %w", err))
+		return fail(errOut, err)
 	}
-	syscall.CloseOnExec(fds[0])
-	syscall.CloseOnExec(fds[1])
-	f := os.NewFile(uintptr(fds[1]), "netbird-conn")
-	local, err := net.FileConn(f) // dups the fd
-	f.Close()
-	if err != nil {
-		conn.Close()
-		syscall.Close(fds[0])
-		return fail(errOut, fmt.Errorf("wrapping socketpair: %w", err))
-	}
-	go pipe(conn, local)
-	*fdOut = C.int(fds[0])
+	*fdOut = fd
 	return 0
-}
-
-type closeWriter interface{ CloseWrite() error }
-
-// pipe copies both ways, half-closing each side when the other finishes.
-func pipe(a, b net.Conn) {
-	var wg sync.WaitGroup
-	cp := func(dst, src net.Conn) {
-		defer wg.Done()
-		_, _ = io.Copy(dst, src)
-		if cw, ok := dst.(closeWriter); ok {
-			_ = cw.CloseWrite()
-		} else {
-			_ = dst.Close()
-		}
-	}
-	wg.Add(2)
-	go cp(a, b)
-	go cp(b, a)
-	wg.Wait()
-	a.Close()
-	b.Close()
 }
 
 // ---- browser (SSO) login ----------------------------------------------------
@@ -479,8 +366,7 @@ func nb_sso_begin(mgmtURL *C.char, out **C.char, errOut **C.char) C.int {
 	}
 
 	mu.Lock()
-	id := nextID
-	nextID++
+	id := newHandle()
 	flows[id] = flow
 	mu.Unlock()
 

@@ -5,7 +5,7 @@
 //! (always present on macOS, honours proxies and the system trust store),
 //! verifies the hash in Rust, and unpacks with the system `tar` / `unzip`.
 //!
-//! It is used by `netbird-sys/build.rs`, `src-tauri/build.rs` and `xtask`.
+//! It is used by `overlay-sys/build.rs`, `src-tauri/build.rs` and `xtask`.
 
 pub mod bundle;
 
@@ -70,8 +70,9 @@ pub struct Go {
     pub archives: BTreeMap<String, Archive>,
 }
 
+/// A Go client linked into the app (reference only; go.mod pins it).
 #[derive(Debug, Deserialize)]
-pub struct Netbird {
+pub struct GoClient {
     pub repo: String,
     pub version: String,
 }
@@ -83,7 +84,8 @@ pub struct Pins {
     #[serde(rename = "platform-tools")]
     pub platform_tools: PlatformTools,
     pub go: Go,
-    pub netbird: Netbird,
+    pub netbird: GoClient,
+    pub tailscale: GoClient,
 }
 
 impl Pins {
@@ -303,6 +305,7 @@ mod tests {
             assert_eq!(a.sha256.len(), 64);
         }
         assert!(pins.netbird.version.starts_with('v'));
+        assert!(pins.tailscale.version.starts_with('v'));
     }
 
     #[test]

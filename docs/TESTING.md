@@ -8,15 +8,20 @@ cargo test --workspace
 
 This covers:
 - `fetch`: pins, SHA-256, and rejecting a wrong hash.
-- `pb-core` unit tests: NetBird status parsing (direct / relayed / not connected peers, null lists, management warnings), login-error classification and friendly messages, NetBird manager input checks, dial error classification, adb `devices -l` and phone-IP parsing, the `--list-apps` parser (fixture made with scrcpy's own formatting rules, including wrapped long names), scrcpy argument building, and process registry (stderr tail, process-group kill, crash cleanup that only kills matching executables).
+- `pb-core` unit tests: NetBird and Tailscale status parsing (direct / relayed / DERP / idle peers, null lists, management warnings, Tailscale login, approval and auth-key states), login-error classification and friendly messages for each network, the network manager (input checks, a separate login folder and server per network, switching), the Tailscale "has a saved login" check, dial error classification, adb `devices -l` and phone-IP parsing, the `--list-apps` parser (fixture made with scrcpy's own formatting rules, including wrapped long names), scrcpy argument building, and process registry (stderr tail, process-group kill, crash cleanup that only kills matching executables).
 - Forwarder: echo, byte counters, a 100 MB throughput run, refused-dial reporting, retargeting, and stopping.
-- `pb-core/tests/connection.rs`: the connection state machine against a fake `adb` and a scripted dialer. It covers connect, phone needs USB (refused), peer not connected plus dial timeout, a peer that looks idle but answers, dial timeout, NetBird drop and recovery, unauthorized then allowed, device drop mid-session, phone stops answering (reboot), user disconnect, and NetBird IP change.
+- `pb-core/tests/connection.rs`: the connection state machine against a fake `adb` and a scripted dialer. It covers connect, phone needs USB (refused), peer not connected plus dial timeout, a peer that looks idle but answers, dial timeout, network drop and recovery, unauthorized then allowed, device drop mid-session, phone stops answering (reboot), user disconnect, overlay IP change, and messages naming the network in use.
+- App settings: each network keeps its own phone when switching, and old settings load as NetBird.
 
-Checked live from the build sandbox against NetBird Cloud: `probe login` returns a real browser-login URL (PKCE), and a fake setup key is rejected by the server and reported as "log in again".
+Checked live from the build sandbox (with NetBird and Tailscale linked into one library):
+- NetBird Cloud: `probe login` returns a real browser-login URL (PKCE), and a fake setup key is rejected and reported as "log in again".
+- Tailscale: `probe --network tailscale login` gets a login.tailscale.com URL in about 2 s, and a fake auth key is rejected ("Tailscale auth key: invalid key: API key does not exist").
 
 ## Mac checkpoints (Phase 2)
 
-Run these on the Mac, in order, and paste the output back. Each one proves a layer before the next is added. `probe` keeps its own NetBird identity (`phonebridge-probe`, state in `target/phonebridge-cache/probe-state`), separate from the app. Remove it from the NetBird dashboard (Peers) when you're done.
+Run these on the Mac, in order, and paste the output back. Each one proves a layer before the next is added. `probe` keeps its own identity on each network (`phonebridge-probe`, state in `target/phonebridge-cache/probe-state/netbird` and `…/tailscale`), separate from the app. Remove it from the NetBird dashboard (Peers) and the Tailscale admin console (Machines) when you're done.
+
+Every probe command works on either network: add `--network tailscale` before the command for Tailscale (default: NetBird). The phone must run the matching VPN app; Android runs only one at a time, so switch the phone's app when you switch the probe.
 
 ### Checkpoint 1: NetBird only
 
@@ -24,7 +29,19 @@ Run these on the Mac, in order, and paste the output back. Each one proves a lay
 cargo run -p pb-core --example probe -- login
 ```
 
-If the probe already has a saved login, `login` just reuses it (add `--relogin` to sign in again). Otherwise, open the printed URL and sign in (or use `cargo run -p pb-core --example probe -- --setup-key YOUR-KEY login`; add `--management-url https://…` for a self-hosted server). Expected: `state: Running`, then a peer table that includes your phone, `connected: true` within a few seconds.
+If the probe already has a saved login, `login` just reuses it (add `--relogin` to sign in again). Otherwise, open the printed URL and sign in (or use `cargo run -p pb-core --example probe -- --setup-key YOUR-KEY login`; add `--server-url https://…` for a self-hosted server). Expected: `state: Running`, then a peer table that includes your phone, `online: true` within a few seconds.
+
+For Tailscale (with the Tailscale app connected on the phone instead of NetBird):
+
+```bash
+cargo run -p pb-core --example probe -- --network tailscale login
+```
+
+```bash
+cargo run -p pb-core --example probe -- --network tailscale peers
+```
+
+Expected: a login.tailscale.com link (first time), then `state: Running` and a peer table with the phone (`os` android). Tailscale connects on demand, so `link` shows `Idle` until the first dial; after `dial`/`adb-test` it shows `Direct { addr }` or `Relayed { via: "DERP …" }`. An auth key works too: `--setup-key tskey-auth-…`. For Headscale, add `--server-url https://your-headscale`.
 
 ```bash
 cargo run -p pb-core --example probe -- peers
@@ -106,7 +123,7 @@ Do each step with the app connected (and one app window open where relevant). "U
 |---|---|---|
 | 1 | `pkill -f 'Contents/MacOS/adb'` (or `pkill adb` in dev) | Windows close with an error toast. UI: Reconnecting… then Connected within ~5 s (adb server restarts). |
 | 2 | Phone: airplane mode for 60 s, then off | UI: Reconnecting… then "Can't reach …: … offline/timed out. Retrying in Ns" (backoff 1 → 30 s), then Connected after it's back. |
-| 3 | Phone: switch NetBird off, then on | UI: Phone not reachable over NetBird ("isn't connected to NetBird…") → Connected. |
+| 3 | Phone: switch NetBird (or Tailscale) off, then on | UI: Phone unreachable ("isn't connected to NetBird…") → Connected. |
 | 4 | Reboot the phone | UI: "pixel restarted… plug in USB once" (port 5555 refused). Plug in → Re-enable via USB → Connected. |
 | 5 | Mac: turn Wi-Fi off for 60 s, then on | UI: Phone not reachable / Reconnecting (the NetBird pill shows a management warning on hover) → Connected. |
 | 6 | Sleep the Mac 5 min, wake | Reconnects by itself (liveness check within ~15 s). |
@@ -115,8 +132,11 @@ Do each step with the app connected (and one app window open where relevant). "U
 | 9 | Settings → Log out of NetBird | Windows close. The login view returns. The peer is logged out in the NetBird dashboard; delete it there if it was added with a setup key. |
 | 10 | Click the same app twice | Toast: "X is already open in a window". |
 | 11 | Unplug and replug USB during "Set up via USB" | Clear error toast ("No phone found on USB" / "hasn't allowed this Mac yet") with a hint. |
-| 12 | Settings → Log out, then "Sign in with browser" and close the browser tab without logging in | Login view stays on "Waiting for NetBird login…"; after ~5 minutes it shows "login cancelled or timed out" with a Sign in button. |
+| 12 | Settings → Log out, then "Sign in with browser" and close the browser tab without logging in | Login view stays on "Waiting for NetBird login…"; after 10 minutes it says the browser login wasn't finished, with a Sign in button. |
 | 13 | Log in with a setup key that was revoked | Login view: "NetBird rejected the setup key (wrong, used up, revoked or expired)." |
+| 14 | Settings → Network → Tailscale (first time), with the phone switched to the Tailscale app | Windows close. The login view says "Connect PhoneBridge to Tailscale" and the browser opens the Tailscale login. After signing in: "Set up via USB" (the phone has a different address on Tailscale), then Connected. |
+| 15 | Settings → Network → NetBird, phone back on the NetBird app | Reconnects to the NetBird phone without signing in or USB (each network keeps its login and phone). Switch back to Tailscale: same, no sign-in. |
+| 16 | On Tailscale: Settings → Log out of Tailscale | Login view returns; the machine shows as logged out in the Tailscale admin console. |
 
 ## Packaging checks (Phase 3)
 
@@ -148,10 +168,10 @@ cargo xtask dist
    ```
 
    (Undo with `brew link scrcpy` and `brew link android-platform-tools`.)
-2. Quit the NetBird Mac app if it's installed (menu bar → Quit, and `netbird down` if you use the CLI), and check it's gone:
+2. Quit the NetBird and Tailscale Mac apps if they're installed (menu bar → Quit; `netbird down` if you use NetBird's CLI), and check they're gone:
 
    ```bash
-   pgrep -fl -i netbird
+   pgrep -fl -i 'netbird|tailscale'
    ```
 
 3. Launch `/Applications/PhoneBridge.app` (from Finder, not a terminal).
@@ -169,4 +189,4 @@ cargo xtask dist
    ```
 
    Expected: only 127.0.0.1 connections.
-6. In the NetBird dashboard, `phonebridge-mac` is its own peer and is connected, with no NetBird app running on the Mac.
+6. In the NetBird dashboard (or the Tailscale admin console, when using Tailscale), `phonebridge-mac` is its own device and is connected, with no NetBird or Tailscale app running on the Mac.

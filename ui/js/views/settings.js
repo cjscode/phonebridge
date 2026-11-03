@@ -1,9 +1,10 @@
 // @ts-check
-// Settings dialog: NetBird, phone, window options, diagnostics.
+// Settings dialog: network (NetBird / Tailscale), phone, window options, diagnostics.
 
 import { call } from "../api.js";
 import { busy, h, replace } from "../dom.js";
-import { linkText, set, state } from "../store.js";
+import { linkText, netLabel, set, state } from "../store.js";
+import { networkPicker } from "../components/network-picker.js";
 import { showToast } from "../components/toast.js";
 
 /** @param {string} label @param {() => Promise<any>} fn @param {string} [cls] */
@@ -30,6 +31,7 @@ export function openSettings() {
     const phone = s?.phone;
     const peer = phone ? t?.peers.find((p) => p.id === phone.node_id) : null;
     const w = s?.window;
+    const net = netLabel();
     /** @param {keyof import("../store.js").WindowOptions} key @param {string} label @param {string} [hint] */
     const opt = (key, label, hint) =>
       h(
@@ -49,21 +51,28 @@ export function openSettings() {
 
     replace(
       body,
-      h("h2", null, "NetBird"),
+      h("h2", null, "Network"),
+      h(
+        "div.row",
+        null,
+        networkPicker({ onSwitched: () => dlg.close() }),
+        h("span.small.muted", null, "Each network keeps its own login and phone. Use the one your phone's VPN app is on."),
+      ),
       kv([
         ["This device", t?.self_name ?? state.deviceName],
         ["Addresses", t?.self_ips.join(", ")],
-        ["Server", state.managementUrl],
+        [net === "Tailscale" ? "Tailnet" : "Server", net === "Tailscale" ? (t?.network ?? state.managementUrl) : state.managementUrl],
+        ...(net === "Tailscale" && state.managementUrl !== "https://controlplane.tailscale.com" ? [["Control server", state.managementUrl]] : []),
         ["State", t?.state.kind],
       ]),
       t?.health.length ? h("p.small.muted", null, t.health.join(" · ")) : null,
       h(
         "div.row",
         null,
-        btn("Log out of NetBird", async () => {
-          if (!confirm("Log PhoneBridge out of NetBird? Open windows will close, and this Mac leaves your NetBird network.")) return;
+        btn(`Log out of ${net}`, async () => {
+          if (!confirm(`Log PhoneBridge out of ${net}? Open windows will close, and this Mac leaves your ${net} network.`)) return;
           await call("net_logout");
-          showToast("Logged out of NetBird.");
+          showToast(`Logged out of ${net}.`);
           dlg.close();
         }, "danger"),
       ),
@@ -73,9 +82,9 @@ export function openSettings() {
         ? [
             kv([
               ["Name", phone.name],
-              ["NetBird IP", phone.ip],
+              [`${net} IP`, phone.ip],
               ["Status", state.connection.kind.replaceAll("_", " ")],
-              ["Path", peer ? (linkText(peer.link) || "not connected") + (peer.latency_ms ? ` · ${peer.latency_ms} ms` : "") : "not in your NetBird network"],
+              ["Path", peer ? (linkText(peer.link) || "not connected") + (peer.latency_ms ? ` · ${peer.latency_ms} ms` : "") : `not in your ${net} network`],
             ]),
             h(
               "div.row.wrap",
@@ -128,7 +137,7 @@ export function openSettings() {
               ? `${fmtBytes(d.forwarder_stats.bytes_down)} down / ${fmtBytes(d.forwarder_stats.bytes_up)} up, ${d.forwarder_stats.total_connections} connection(s)`
               : "—",
           ],
-          ["NetBird identity", h("code", null, d.netbird_state_dir)],
+          [`${netLabel()} identity`, h("code", null, d.net_state_dir)],
           ["Logs", h("code", null, d.log_dir)],
           ["Other installs", d.system_copies.length ? d.system_copies.join(", ") + " (not used)" : "none found"],
         ]),

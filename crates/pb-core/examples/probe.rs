@@ -1,7 +1,8 @@
 //! Milestone CLI: proves each layer on its own, outside the app.
 //!
 //!   cargo run -p pb-core --example probe -- login                  (browser login)
-//!   cargo run -p pb-core --example probe -- --setup-key KEY login  (or a setup key)
+//!   cargo run -p pb-core --example probe -- --setup-key KEY login  (or a setup/auth key)
+//!   cargo run -p pb-core --example probe -- --network tailscale login
 //!   cargo run -p pb-core --example probe -- status
 //!   cargo run -p pb-core --example probe -- peers
 //!   cargo run -p pb-core --example probe -- dial 100.x.y.z:5555
@@ -9,10 +10,13 @@
 //!   cargo run -p pb-core --example probe -- adb-test 100.x.y.z
 //!   cargo run -p pb-core --example probe -- scrcpy 100.x.y.z [--force-adb-forward]
 //!
-//! Options (before the command): --state DIR (default: a "probe-state" folder
-//! in the build cache, separate from the app's), --name NAME (NetBird device
-//! name, default phonebridge-probe), --setup-key KEY, --management-url URL
-//! (default NetBird Cloud). `login` saves the identity; later commands reuse it.
+//! Options (before the command): --network netbird|tailscale (default netbird),
+//! --state DIR (default: a "probe-state" folder in the build cache, separate
+//! from the app's; each network gets a subfolder), --name NAME (device name,
+//! default phonebridge-probe), --setup-key KEY (NetBird setup key or Tailscale
+//! auth key), --server-url URL (self-hosted NetBird management server or
+//! Headscale; default NetBird Cloud / Tailscale). `login` saves the identity;
+//! later commands reuse it.
 //!
 //! adb-test / scrcpy use the binaries placed by `cargo xtask fetch`.
 
@@ -24,12 +28,12 @@ use std::time::{Duration, Instant};
 
 use pb_core::adb::Adb;
 use pb_core::forwarder::{Dialer, Forwarder, bind_loopback};
-use pb_core::overlay::{DEFAULT_MANAGEMENT_URL, NetManager, NetSnapshot, NetState};
+use pb_core::overlay::{NetManager, NetSnapshot, NetState, Network};
 use pb_core::tools::BundledTools;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: probe [--state DIR] [--name NAME] [--setup-key KEY] [--management-url URL] [--relogin] \
+        "usage: probe [--network netbird|tailscale] [--state DIR] [--name NAME] [--setup-key KEY] [--server-url URL] [--relogin] \
          <login|status|peers|dial IP:PORT|forward IP|adb-test IP|scrcpy IP [--force-adb-forward]>"
     );
     ExitCode::from(2)
@@ -57,7 +61,7 @@ async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,netbird=warn".into()),
+                .unwrap_or_else(|_| "info,netbird=warn,tailscale=warn".into()),
         )
         .with_target(false)
         .init();
@@ -72,8 +76,21 @@ async fn main() -> ExitCode {
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace().join("target/phonebridge-cache/probe-state"));
     let name = opt("--name").unwrap_or_else(|| "phonebridge-probe".into());
-    let setup_key = opt("--setup-key");
-    let mgmt = opt("--management-url").unwrap_or_else(|| DEFAULT_MANAGEMENT_URL.into());
+    let setup_key = opt("--setup-key").or_else(|| opt("--auth-key"));
+    let network = match opt("--network") {
+        None => Network::Netbird,
+        Some(n) => match Network::parse(&n) {
+            Some(n) => n,
+            None => {
+                eprintln!("unknown network {n:?} (use netbird or tailscale)");
+                return usage();
+            }
+        },
+    };
+    let server = opt("--server-url")
+        .or_else(|| opt("--management-url"))
+        .unwrap_or_default();
+    migrate_old_probe_state(&state);
     let mut flag = |name: &str| -> bool {
         match args.iter().position(|a| a == name) {
             Some(i) => {
@@ -90,11 +107,12 @@ async fn main() -> ExitCode {
     };
     let arg = args.get(1).cloned();
 
+    let tn = NetManager::new(&state, &name, network, server);
     println!(
-        "NetBird state dir: {}\nmanagement server: {mgmt}",
-        state.display()
+        "{network} state dir: {}\nserver: {}",
+        tn.state_dir().display(),
+        tn.management_url()
     );
-    let tn = NetManager::new(&state, &name, &mgmt);
     let reuse_login = cmd == "login" && setup_key.is_none() && !relogin && tn.has_saved_login();
     if reuse_login {
         println!("Already logged in; reusing the saved login (pass --relogin to sign in again).");
@@ -103,7 +121,9 @@ async fn main() -> ExitCode {
         match setup_key {
             Some(k) => tn.login_with_setup_key(k).await,
             None => tn.login_browser().await.map(|flow| {
-                println!("Open this URL to log in to NetBird:\n  {}", flow.url);
+                if !flow.url.is_empty() {
+                    println!("Open this URL to log in to {network}:\n  {}", flow.url);
+                }
                 if let Some(code) = &flow.user_code {
                     println!("and enter the code: {code}");
                 }
@@ -113,7 +133,7 @@ async fn main() -> ExitCode {
         tn.start().await
     };
     if let Err(e) = started {
-        eprintln!("failed to start NetBird: {e}");
+        eprintln!("failed to start {network}: {e}");
         return ExitCode::FAILURE;
     }
 
@@ -155,13 +175,27 @@ async fn main() -> ExitCode {
 
 type R = Result<(), String>;
 
+/// Earlier probes kept NetBird's files directly in the state folder; move them
+/// into its `netbird` subfolder so the saved login keeps working.
+fn migrate_old_probe_state(state: &Path) {
+    let old = state.join("config.json");
+    let new_dir = state.join(Network::Netbird.dir_name());
+    if old.is_file() && !new_dir.exists() && std::fs::create_dir_all(&new_dir).is_ok() {
+        for f in ["config.json", "state.json"] {
+            let _ = std::fs::rename(state.join(f), new_dir.join(f));
+        }
+        println!("moved the saved NetBird login into {}", new_dir.display());
+    }
+}
+
 fn print_snapshot(s: &NetSnapshot) {
+    println!("network: {}", s.kind);
     println!("state: {:?}", s.state);
     if let Some(n) = &s.self_name {
         println!("this node: {n} {:?}", s.self_ips);
     }
     if let Some(t) = &s.network {
-        println!("management: {t}");
+        println!("server / tailnet: {t}");
     }
     for h in &s.health {
         println!("health: {h}");
@@ -172,16 +206,21 @@ fn print_snapshot(s: &NetSnapshot) {
     );
     if s.synced && s.peers.is_empty() {
         println!(
-            "no peers visible: is the phone in the same NetBird account, and do access policies allow this device to reach it?"
+            "no peers visible: is the phone in the same {} account, and do access policies allow this device to reach it?",
+            s.kind
         );
     }
     if !s.peers.is_empty() {
-        println!("\n{:<28} {:<10} {:<17} link", "peer", "connected", "ipv4");
+        println!(
+            "\n{:<28} {:<10} {:<10} {:<17} link",
+            "peer", "online", "os", "ipv4"
+        );
         for p in &s.peers {
             println!(
-                "{:<28} {:<10} {:<17} {:?}",
+                "{:<28} {:<10} {:<10} {:<17} {:?}",
                 p.display_name(),
                 p.online,
+                p.os,
                 p.ipv4().map(|i| i.to_string()).unwrap_or_default(),
                 p.link
             );
@@ -232,7 +271,10 @@ async fn wait_synced(tn: &Arc<NetManager>, mut s: NetSnapshot) -> NetSnapshot {
         s = tn.refresh().await;
     }
     if !s.synced {
-        println!("note: no network map from NetBird after 20 s; the peer list may be incomplete");
+        println!(
+            "note: no network map from {} after 20 s; the peer list may be incomplete",
+            s.kind
+        );
     }
     s
 }
@@ -249,7 +291,7 @@ async fn wait_running(tn: &Arc<NetManager>, limit: Duration) -> Result<NetSnapsh
                 auth_url: Some(url),
                 ..
             } if shown_url.as_deref() != Some(url) => {
-                println!("Waiting for NetBird login… open:\n  {url}");
+                println!("Waiting for {} login… open:\n  {url}", s.kind);
                 shown_url = Some(url.clone());
             }
             NetState::NeedsLogin {
@@ -258,7 +300,8 @@ async fn wait_running(tn: &Arc<NetManager>, limit: Duration) -> Result<NetSnapsh
                 ..
             } => {
                 return Err(format!(
-                    "not logged in to NetBird{}; run `probe login` first",
+                    "not logged in to {}{}; run `probe login` first",
+                    s.kind,
                     reason
                         .as_deref()
                         .map(|r| format!(" ({r})"))
@@ -269,7 +312,8 @@ async fn wait_running(tn: &Arc<NetManager>, limit: Duration) -> Result<NetSnapsh
         }
         if Instant::now() > deadline {
             return Err(format!(
-                "NetBird not running after {}s (state {:?})",
+                "{} not running after {}s (state {:?})",
+                s.kind,
                 limit.as_secs(),
                 s.state
             ));
@@ -285,7 +329,8 @@ async fn cmd_dial(tn: &Arc<NetManager>, addr: SocketAddr) -> R {
     match dialer.dial(addr).await {
         Ok(_stream) => {
             println!(
-                "OK: TCP connection to {addr} through NetBird in {:?}",
+                "OK: TCP connection to {addr} through {} in {:?}",
+                tn.network(),
                 t.elapsed()
             );
             Ok(())

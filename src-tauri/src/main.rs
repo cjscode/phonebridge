@@ -32,8 +32,10 @@ pub fn report_error(app: &AppHandle, e: AppError) {
 
 fn init_logging(log_dir: &Path) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_subscriber::prelude::*;
-    let filter = tracing_subscriber::EnvFilter::try_from_env("PHONEBRIDGE_LOG")
-        .unwrap_or_else(|_| "info,netbird=info,scrcpy=info,tao=warn,wry=warn".into());
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_env("PHONEBRIDGE_LOG").unwrap_or_else(|_| {
+            "info,netbird=info,tailscale=info,scrcpy=info,tao=warn,wry=warn".into()
+        });
     let stderr = tracing_subscriber::fmt::layer()
         .with_target(false)
         .with_writer(std::io::stderr);
@@ -125,10 +127,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let adb = Adb::new(tools.clone());
     let scrcpy = Scrcpy::new(tools.clone());
+    // Each network keeps its login in its own folder: <data>/netbird, <data>/tailscale.
     let net = NetManager::new(
-        data_dir.join("netbird"),
+        &data_dir,
         pb_core::DEFAULT_HOSTNAME,
-        s.management_url.clone(),
+        s.network,
+        s.server_url(s.network),
     );
     let procs = ProcessRegistry::new(Some(pid_file), &tools.scrcpy);
 
@@ -165,7 +169,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     tray::create(&handle)?;
     spawn_pumps(&handle, &state);
 
-    // Start our adb server fresh (a crashed run may have left one), then NetBird.
+    // Start our adb server fresh (a crashed run may have left one), then the network.
     // First run (no saved login): start a browser login right away; the pump
     // below opens it.
     let st = state.clone();
@@ -201,7 +205,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Forward core state changes to the UI and the tray.
 fn spawn_pumps(app: &AppHandle, state: &SharedState) {
-    // NetBird status.
+    // Network status.
     let (h, st) = (app.clone(), state.clone());
     tauri::async_runtime::spawn(async move {
         let mut rx = st.net.subscribe();
@@ -216,7 +220,7 @@ fn spawn_pumps(app: &AppHandle, state: &SharedState) {
                 let mut opened = st.opened_auth_url.lock().unwrap();
                 if opened.as_deref() != Some(url.as_str()) {
                     *opened = Some(url.clone());
-                    tracing::info!("opening NetBird login page");
+                    tracing::info!("opening {} login page", snap.kind);
                     if let Err(e) = h.opener().open_url(url, None::<&str>) {
                         report_error(
                             &h,
@@ -336,7 +340,7 @@ pub fn quit(app: &AppHandle) {
     });
 }
 
-/// Close windows, disconnect adb, stop our adb server and forwarder, then NetBird.
+/// Close windows, disconnect adb, stop our adb server and forwarder, then the network.
 async fn shutdown(state: SharedState) {
     tracing::info!("shutting down");
     state.procs.terminate_all(Duration::from_secs(2)).await;
@@ -361,6 +365,7 @@ fn main() {
             commands::net_retry,
             commands::net_logout,
             commands::net_set_management_url,
+            commands::net_set_network,
             commands::usb_detect,
             commands::usb_setup,
             commands::usb_reenable,

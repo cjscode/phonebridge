@@ -5,7 +5,7 @@ import { call, on } from "./api.js";
 import { renderBanner, renderPills } from "./components/status-banner.js";
 import { showError } from "./components/toast.js";
 import { h, replace } from "./dom.js";
-import { set, state, subscribe } from "./store.js";
+import { currentNetwork, serverUrlOf, set, state, subscribe } from "./store.js";
 import * as home from "./views/home.js";
 import * as login from "./views/login.js";
 import { openSettings } from "./views/settings.js";
@@ -30,9 +30,11 @@ function render() {
   }
   const name = pickView();
   const root = /** @type {HTMLElement} */ (document.getElementById("view"));
-  if (current?.name !== name) {
+  // Views name the network in their text: rebuild them when it changes.
+  const key = `${name}:${currentNetwork()}`;
+  if (current?.name !== key) {
     const mod = { login, setup, home }[name];
-    current = { name, ...mod.mount(root) };
+    current = { name: key, ...mod.mount(root) };
   }
   current.update();
 }
@@ -45,7 +47,7 @@ async function init() {
   await Promise.all([
     on("net", (net) => set({ net })),
     on("connection", (connection) => set({ connection })),
-    on("settings", (settings) => set({ settings, managementUrl: settings.management_url })),
+    on("settings", (settings) => set({ settings, network: settings.network, managementUrl: serverUrlOf(settings) })),
     on("windows", (windows) => set({ windows })),
     on("app-error", (e) => showError(e)),
   ]);
@@ -57,6 +59,7 @@ async function init() {
     settings: o.settings,
     windows: o.windows,
     deviceName: o.device_name,
+    network: o.network,
     managementUrl: o.management_url,
     toolsError: o.tools_error,
   });

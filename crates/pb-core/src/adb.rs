@@ -99,7 +99,7 @@ pub fn parse_devices(text: &str) -> Vec<Device> {
     out
 }
 
-/// All non-loopback IPv4 addresses in `ip -4 -o addr` output. The NetBird
+/// All non-loopback IPv4 addresses in `ip -4 -o addr` output. The overlay
 /// address is matched against the peer list (self-hosted networks may use any
 /// range, so we don't guess by prefix).
 pub fn parse_ipv4s(text: &str) -> Vec<Ipv4Addr> {
@@ -295,7 +295,7 @@ impl Adb {
         }
     }
 
-    /// The phone's IPv4 addresses (including its NetBird one), read over USB.
+    /// The phone's IPv4 addresses (including its NetBird/Tailscale one), read over USB.
     pub async fn ipv4_addrs(&self, serial: &str) -> Result<Vec<Ipv4Addr>, AppError> {
         let out = self
             .shell(serial, "ip -4 -o addr show", Duration::from_secs(10))

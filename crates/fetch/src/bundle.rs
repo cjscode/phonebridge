@@ -120,7 +120,7 @@ fn copy_notices(workspace: &Path, licenses: &Path, go_licenses: Option<&Path>) -
     if notices.is_file() {
         install_file(&notices, &licenses.join("THIRD_PARTY_NOTICES.md"), false)?;
     }
-    // Left by builds from before the switch to NetBird.
+    // Left by builds from the libtailscale era (Tailscale is now in the Go module list).
     let _ = fs::remove_file(licenses.join("libtailscale-LICENSE.txt"));
     if let Some(go) = go_licenses.filter(|p| p.is_dir()) {
         let dest = licenses.join("go");

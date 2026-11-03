@@ -1,4 +1,5 @@
-//! The app's own NetBird peer (userspace, in-process) and a dialer over it.
+//! The app's own overlay-network device (NetBird peer or Tailscale node,
+//! userspace, in-process) and a dialer over it.
 
 pub mod node;
 pub mod status;
@@ -12,7 +13,7 @@ use std::time::Duration;
 use tokio::sync::{Notify, watch};
 
 pub use node::{Credential, DialError, Node, NodeConfig, SsoFlow};
-pub use status::{NetSnapshot, NetState, Peer, PeerLink};
+pub use status::{NetSnapshot, NetState, Network, Peer, PeerLink};
 
 use crate::connection::backoff;
 use crate::error::{AppError, ErrorCode};
@@ -20,13 +21,21 @@ use crate::forwarder::{BoxFuture, BoxStream, Dialer};
 
 /// NetBird Cloud. Self-hosted users change this in Settings.
 pub const DEFAULT_MANAGEMENT_URL: &str = "https://api.netbird.io:443";
+/// Tailscale's control server. Headscale users change this in Settings.
+pub const DEFAULT_CONTROL_URL: &str = "https://controlplane.tailscale.com";
 
 const START_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a Tailscale browser login waits for its URL.
+const LOGIN_URL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Owns the current NetBird client, logs in, polls status and publishes snapshots.
+/// Owns the current overlay client (NetBird or Tailscale), logs in, polls
+/// status and publishes snapshots.
 pub struct NetManager {
-    state_dir: PathBuf,
+    /// Each network keeps its login in `<base_dir>/<network>`.
+    base_dir: PathBuf,
     device_name: String,
+    network: Mutex<Network>,
+    /// Management (NetBird) or control (Tailscale/Headscale) server URL.
     management_url: Mutex<String>,
     node: Mutex<Option<Arc<Node>>>,
     tx: watch::Sender<NetSnapshot>,
@@ -39,14 +48,23 @@ pub struct NetManager {
 }
 
 /// Turn a login error into something a person can act on.
-fn friendly_login_reason(msg: &str) -> String {
+pub(crate) fn friendly_login_reason(network: Network, msg: &str) -> String {
     let m = msg.to_ascii_lowercase();
+    let label = network.label();
     if m.contains("expired") {
-        "Your NetBird login expired. Sign in again.".into()
-    } else if m.contains("setup key") || m.contains("setupkey") {
-        "NetBird rejected the setup key (wrong, used up, revoked or expired).".into()
+        format!("Your {label} login expired. Sign in again.")
+    } else if m.contains("setup key")
+        || m.contains("setupkey")
+        || m.contains("invalid key")
+        || m.contains("auth key")
+        || m.contains("authkey")
+    {
+        format!(
+            "{label} rejected the {} (wrong, used up, revoked or expired).",
+            network.key_name()
+        )
     } else if m.contains("approval") {
-        "This Mac is waiting for approval in the NetBird dashboard.".into()
+        format!("This Mac is waiting for approval in the {label} admin console.")
     } else if m.contains("no saved netbird login") || m.contains("no private key") {
         "Not logged in yet.".into()
     } else {
@@ -55,16 +73,26 @@ fn friendly_login_reason(msg: &str) -> String {
 }
 
 impl NetManager {
+    /// `base_dir` holds one folder per network; `management_url` is the
+    /// server for `network` (empty = its default).
     pub fn new(
-        state_dir: impl Into<PathBuf>,
+        base_dir: impl Into<PathBuf>,
         device_name: impl Into<String>,
+        network: Network,
         management_url: impl Into<String>,
     ) -> Arc<Self> {
-        let (tx, _rx) = watch::channel(NetSnapshot::starting());
+        let (tx, _rx) = watch::channel(NetSnapshot::of(network, NetState::Starting));
+        let url: String = management_url.into();
+        let url = if url.trim().is_empty() {
+            network.default_server_url().to_string()
+        } else {
+            url
+        };
         Arc::new(Self {
-            state_dir: state_dir.into(),
+            base_dir: base_dir.into(),
             device_name: device_name.into(),
-            management_url: Mutex::new(management_url.into()),
+            network: Mutex::new(network),
+            management_url: Mutex::new(url),
             node: Mutex::new(None),
             tx,
             poke: Arc::new(Notify::new()),
@@ -82,8 +110,17 @@ impl NetManager {
         self.tx.borrow().clone()
     }
 
-    pub fn state_dir(&self) -> &Path {
-        &self.state_dir
+    pub fn network(&self) -> Network {
+        *self.network.lock().unwrap()
+    }
+
+    /// This network's login folder.
+    pub fn state_dir(&self) -> PathBuf {
+        self.base_dir.join(self.network().dir_name())
+    }
+
+    pub fn base_dir(&self) -> &Path {
+        &self.base_dir
     }
 
     pub fn device_name(&self) -> &str {
@@ -98,13 +135,13 @@ impl NetManager {
         self.node.lock().unwrap().clone()
     }
 
-    /// True if an earlier login saved this peer's identity.
+    /// True if an earlier login saved this device's identity.
     pub fn has_saved_login(&self) -> bool {
-        NodeConfig::config_path(&self.state_dir).is_file()
+        NodeConfig::has_login(self.network(), &self.state_dir())
     }
 
     fn set_state(&self, state: NetState) {
-        self.tx.send_replace(NetSnapshot::with_state(state));
+        self.tx.send_replace(NetSnapshot::of(self.network(), state));
     }
 
     fn bump(&self) -> u64 {
@@ -170,15 +207,34 @@ impl NetManager {
     }
 
     async fn attempt(self: &Arc<Self>, generation: u64, cred: &Credential) -> Result<(), AppError> {
+        let network = self.network();
         let cfg = NodeConfig {
+            network,
             device_name: self.device_name.clone(),
             management_url: self.management_url(),
-            state_dir: self.state_dir.clone(),
+            state_dir: self.state_dir(),
             credential: cred.clone(),
         };
         let res = tokio::task::spawn_blocking(move || -> Result<Arc<Node>, AppError> {
             let node = Node::new(&cfg)?;
             node.start(START_TIMEOUT)?;
+            // Tailscale doesn't fail on a bad auth key; it reports it and
+            // waits for a login. Turn that into an error here.
+            if network == Network::Tailscale && matches!(cfg.credential, Credential::SetupKey(_)) {
+                let st = node.raw_status()?;
+                if st.backend_state != "Running" {
+                    node.stop();
+                    let why = if st.management_error.is_empty() {
+                        format!("didn't finish joining (state {})", st.backend_state)
+                    } else {
+                        st.management_error
+                    };
+                    return Err(AppError::new(
+                        ErrorCode::NotLoggedIn,
+                        format!("Tailscale auth key: {why}"),
+                    ));
+                }
+            }
             Ok(Arc::new(node))
         })
         .await
@@ -198,20 +254,20 @@ impl NetManager {
             Ok(node) => {
                 *self.node.lock().unwrap() = Some(node);
                 self.poke.notify_one();
-                tracing::info!("NetBird is up");
+                tracing::info!("{network} client started");
                 Ok(())
             }
             Err(e) if e.code == ErrorCode::NotLoggedIn => {
-                tracing::warn!("NetBird login needed: {e}");
+                tracing::warn!("{network} login needed: {e}");
                 self.set_state(NetState::NeedsLogin {
                     auth_url: None,
                     user_code: None,
-                    reason: Some(friendly_login_reason(&e.message)),
+                    reason: Some(friendly_login_reason(network, &e.message)),
                 });
                 Err(e)
             }
             Err(e) => {
-                tracing::warn!("NetBird start failed: {e}");
+                tracing::warn!("{network} start failed: {e}");
                 self.set_state(NetState::Error {
                     message: e.message.clone(),
                     retry_in_secs: None,
@@ -221,9 +277,12 @@ impl NetManager {
         }
     }
 
-    /// Start a browser (SSO) login. Returns the URL to open; finishing the login
-    /// in the browser brings NetBird up automatically.
+    /// Start a browser login. Returns the URL to open (the status shows it too);
+    /// finishing the login in the browser brings the network up automatically.
     pub async fn login_browser(self: &Arc<Self>) -> Result<SsoFlow, AppError> {
+        if self.network() == Network::Tailscale {
+            return self.login_browser_tailscale().await;
+        }
         self.cancel_sso();
         let url = self.management_url();
         let flow = tokio::task::spawn_blocking(move || node::sso_begin(&url))
@@ -268,21 +327,86 @@ impl NetManager {
         Ok(flow)
     }
 
+    /// Tailscale's node does the login itself: start it (or ask the running
+    /// one for a new URL), then wait for the URL to show up in its status.
+    async fn login_browser_tailscale(self: &Arc<Self>) -> Result<SsoFlow, AppError> {
+        if self.snapshot().is_running() {
+            return Err(
+                AppError::new(ErrorCode::BadInput, "Already signed in to Tailscale")
+                    .hint("To use another account, log out in Settings first."),
+            );
+        }
+        match self.node() {
+            Some(node) => {
+                tokio::task::spawn_blocking(move || node.request_login())
+                    .await
+                    .map_err(|e| AppError::internal(e.to_string()))??;
+            }
+            // A fresh node with no saved login asks for a browser login by itself.
+            None => self.run(Credential::SavedKey).await?,
+        }
+        let deadline = tokio::time::Instant::now() + LOGIN_URL_TIMEOUT;
+        loop {
+            let snap = self.refresh().await;
+            match snap.state {
+                NetState::NeedsLogin {
+                    auth_url: Some(url),
+                    ..
+                } => {
+                    return Ok(SsoFlow {
+                        id: 0,
+                        kind: "tailscale".into(),
+                        url,
+                        user_code: None,
+                        expires_in: 0,
+                    });
+                }
+                NetState::Running => {
+                    return Ok(SsoFlow {
+                        id: 0,
+                        kind: "tailscale".into(),
+                        url: String::new(),
+                        user_code: None,
+                        expires_in: 0,
+                    });
+                }
+                _ if tokio::time::Instant::now() >= deadline => {
+                    return Err(AppError::new(
+                        ErrorCode::Network,
+                        "Tailscale didn't send a login link",
+                    )
+                    .hint("Check your internet connection (and the control server URL if you use Headscale), then try again."));
+                }
+                _ => tokio::time::sleep(Duration::from_millis(500)).await,
+            }
+        }
+    }
+
     fn cancel_sso(&self) {
         if let Some(id) = self.sso.lock().unwrap().take() {
             node::sso_cancel(id);
         }
     }
 
-    /// Join with a setup key (replaces any saved identity).
+    /// Join with a NetBird setup key or Tailscale auth key (replaces any saved
+    /// identity).
     pub async fn login_with_setup_key(self: &Arc<Self>, key: String) -> Result<(), AppError> {
         let key = key.trim().to_string();
+        let network = self.network();
         if key.len() < 16 || key.contains(char::is_whitespace) {
+            let hint = match network {
+                Network::Netbird => {
+                    "Create one in the NetBird dashboard under Setup Keys, then paste it here."
+                }
+                Network::Tailscale => {
+                    "Create one in the Tailscale admin console under Settings → Keys (it starts with tskey-auth-), then paste it here."
+                }
+            };
             return Err(AppError::new(
                 ErrorCode::BadInput,
-                "That doesn't look like a NetBird setup key",
+                format!("That doesn't look like a {network} {}", network.key_name()),
             )
-            .hint("Create one in the NetBird dashboard under Setup Keys, then paste it here."));
+            .hint(hint));
         }
         self.cancel_sso();
         self.bump();
@@ -298,22 +422,30 @@ impl NetManager {
         } else {
             Err(AppError::new(
                 ErrorCode::NotLoggedIn,
-                "Not logged in to NetBird yet",
+                format!("Not logged in to {} yet", self.network()),
             ))
         }
     }
 
-    /// Log out, forget this peer's identity, and wait for a new login.
+    /// Log out, forget this device's identity, and wait for a new login.
     pub async fn logout(self: &Arc<Self>) -> Result<(), AppError> {
         self.cancel_sso();
         self.bump();
-        if self.has_saved_login() {
-            let (url, dir) = (self.management_url(), self.state_dir.clone());
-            match tokio::task::spawn_blocking(move || node::logout(&url, &dir)).await {
-                Ok(Err(e)) => tracing::warn!("NetBird logout request failed (continuing): {e}"),
-                Err(e) => tracing::warn!("NetBird logout task failed: {e}"),
-                Ok(Ok(())) => {}
+        let network = self.network();
+        let res = match (network, self.node()) {
+            (Network::Netbird, _) if self.has_saved_login() => {
+                let (url, dir) = (self.management_url(), self.state_dir());
+                tokio::task::spawn_blocking(move || node::logout(&url, &dir)).await
             }
+            (Network::Tailscale, Some(node)) => {
+                tokio::task::spawn_blocking(move || node.logout_tailscale()).await
+            }
+            _ => Ok(Ok(())),
+        };
+        match res {
+            Ok(Err(e)) => tracing::warn!("{network} logout request failed (continuing): {e}"),
+            Err(e) => tracing::warn!("{network} logout task failed: {e}"),
+            Ok(Ok(())) => {}
         }
         self.close_node().await;
         self.wipe_state()?;
@@ -325,15 +457,24 @@ impl NetManager {
         Ok(())
     }
 
-    /// Point at another management server (self-hosted). Logs out if it changes.
+    /// Point at another server (self-hosted NetBird, or Headscale). Logs out
+    /// if it changes. An empty URL means the network's default.
     pub async fn set_management_url(self: &Arc<Self>, url: String) -> Result<(), AppError> {
-        let url = url.trim().trim_end_matches('/').to_string();
+        let network = self.network();
+        let mut url = url.trim().trim_end_matches('/').to_string();
+        if url.is_empty() {
+            url = network.default_server_url().to_string();
+        }
         if !(url.starts_with("https://") || url.starts_with("http://")) || url.len() < 10 {
+            let default = match network {
+                Network::Netbird => format!("NetBird Cloud is {DEFAULT_MANAGEMENT_URL}"),
+                Network::Tailscale => format!("Tailscale's own server is {DEFAULT_CONTROL_URL}"),
+            };
             return Err(AppError::new(
                 ErrorCode::BadInput,
-                "The management URL must start with https://",
+                "The server URL must start with https://",
             )
-            .hint(format!("NetBird Cloud is {DEFAULT_MANAGEMENT_URL}")));
+            .hint(default));
         }
         if url == self.management_url() {
             return Ok(());
@@ -351,13 +492,35 @@ impl NetManager {
         Ok(())
     }
 
+    /// Switch to another network. Its own saved login (if any) is used; the
+    /// other network's login is kept for switching back.
+    pub async fn set_network(
+        self: &Arc<Self>,
+        network: Network,
+        management_url: String,
+    ) -> Result<(), AppError> {
+        self.cancel_sso();
+        self.bump();
+        self.close_node().await;
+        let url = if management_url.trim().is_empty() {
+            network.default_server_url().to_string()
+        } else {
+            management_url.trim().trim_end_matches('/').to_string()
+        };
+        *self.network.lock().unwrap() = network;
+        *self.management_url.lock().unwrap() = url;
+        self.set_state(NetState::Starting);
+        self.start().await
+    }
+
     fn wipe_state(&self) -> Result<(), AppError> {
-        match std::fs::remove_dir_all(&self.state_dir) {
+        let dir = self.state_dir();
+        match std::fs::remove_dir_all(&dir) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(AppError::new(
                 ErrorCode::Io,
-                format!("removing {}: {e}", self.state_dir.display()),
+                format!("removing {}: {e}", dir.display()),
             )),
         }
     }
@@ -406,20 +569,27 @@ impl NetManager {
         let Some(node) = self.node() else {
             return false;
         };
+        let network = node.network();
         let res = tokio::task::spawn_blocking(move || node.raw_status()).await;
-        if self.node().is_none() {
+        if self.node().is_none() || self.network() != network {
             return false; // closed meanwhile; don't overwrite the newer state
         }
         let snap = match res {
-            Ok(Ok(raw)) => raw.into_snapshot(),
-            Ok(Err(e)) => NetSnapshot::with_state(NetState::Error {
-                message: e.message,
-                retry_in_secs: None,
-            }),
-            Err(e) => NetSnapshot::with_state(NetState::Error {
-                message: e.to_string(),
-                retry_in_secs: None,
-            }),
+            Ok(Ok(raw)) => raw.into_snapshot(network),
+            Ok(Err(e)) => NetSnapshot::of(
+                network,
+                NetState::Error {
+                    message: e.message,
+                    retry_in_secs: None,
+                },
+            ),
+            Err(e) => NetSnapshot::of(
+                network,
+                NetState::Error {
+                    message: e.to_string(),
+                    retry_in_secs: None,
+                },
+            ),
         };
         self.tx.send_if_modified(|cur| {
             if *cur != snap {
@@ -446,7 +616,7 @@ impl NetManager {
     }
 }
 
-/// Dials TCP through the manager's current NetBird client.
+/// Dials TCP through the manager's current overlay client.
 pub struct NetDialer {
     manager: Arc<NetManager>,
     timeout: Duration,
@@ -482,26 +652,38 @@ impl Dialer for NetDialer {
 mod tests {
     use super::*;
 
+    fn manager(dir: &Path, network: Network) -> Arc<NetManager> {
+        NetManager::new(dir, "pb-test", network, "")
+    }
+
     #[test]
     fn friendly_reasons() {
+        let nb = Network::Netbird;
         assert!(
             friendly_login_reason(
+                nb,
                 "rpc error: code = PermissionDenied desc = peer login has expired"
             )
-            .contains("expired")
+            .contains("NetBird login expired")
         );
-        assert!(friendly_login_reason("invalid setup key").contains("setup key"));
-        assert_eq!(friendly_login_reason("something else"), "something else");
+        assert!(friendly_login_reason(nb, "invalid setup key").contains("setup key"));
+        assert_eq!(
+            friendly_login_reason(nb, "something else"),
+            "something else"
+        );
+        assert_eq!(
+            friendly_login_reason(
+                Network::Tailscale,
+                "invalid key: unable to validate API key"
+            ),
+            "Tailscale rejected the auth key (wrong, used up, revoked or expired)."
+        );
     }
 
     #[tokio::test]
     async fn no_saved_login_waits_for_user() {
         let dir = tempfile::tempdir().unwrap();
-        let m = NetManager::new(
-            dir.path().join("netbird"),
-            "pb-test",
-            DEFAULT_MANAGEMENT_URL,
-        );
+        let m = manager(dir.path(), Network::Netbird);
         m.start().await.unwrap();
         assert_eq!(
             m.snapshot().state,
@@ -517,11 +699,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_bad_inputs() {
         let dir = tempfile::tempdir().unwrap();
-        let m = NetManager::new(
-            dir.path().join("netbird"),
-            "pb-test",
-            DEFAULT_MANAGEMENT_URL,
-        );
+        let m = manager(dir.path(), Network::Netbird);
         assert_eq!(
             m.login_with_setup_key("nope".into())
                 .await
@@ -545,11 +723,7 @@ mod tests {
     #[tokio::test]
     async fn dial_without_node_is_not_running() {
         let dir = tempfile::tempdir().unwrap();
-        let m = NetManager::new(
-            dir.path().join("netbird"),
-            "pb-test",
-            DEFAULT_MANAGEMENT_URL,
-        );
+        let m = manager(dir.path(), Network::Netbird);
         let err = m
             .dialer()
             .dial("100.64.0.1:5555".parse().unwrap())
@@ -557,5 +731,52 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err, DialError::NotRunning);
+    }
+
+    #[tokio::test]
+    async fn each_network_has_its_own_login_and_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(dir.path(), Network::Netbird);
+        assert_eq!(m.management_url(), DEFAULT_MANAGEMENT_URL);
+        assert_eq!(m.state_dir(), dir.path().join("netbird"));
+        // A saved NetBird login doesn't count for Tailscale.
+        std::fs::create_dir_all(dir.path().join("netbird")).unwrap();
+        std::fs::write(dir.path().join("netbird/config.json"), "{}").unwrap();
+        assert!(m.has_saved_login());
+
+        // No Tailscale login yet: switching waits for one (doesn't start a node).
+        m.set_network(Network::Tailscale, String::new())
+            .await
+            .unwrap();
+        assert_eq!(m.network(), Network::Tailscale);
+        assert_eq!(m.management_url(), DEFAULT_CONTROL_URL);
+        assert_eq!(m.state_dir(), dir.path().join("tailscale"));
+        assert!(!m.has_saved_login());
+        let snap = m.snapshot();
+        assert_eq!(snap.kind, Network::Tailscale);
+        assert!(matches!(
+            snap.state,
+            NetState::NeedsLogin { auth_url: None, .. }
+        ));
+        assert!(m.node().is_none());
+
+        // Headscale: any https URL; empty means Tailscale's own server.
+        m.set_management_url("https://headscale.example.com/".into())
+            .await
+            .unwrap();
+        assert_eq!(m.management_url(), "https://headscale.example.com");
+        m.set_management_url(String::new()).await.unwrap();
+        assert_eq!(m.management_url(), DEFAULT_CONTROL_URL);
+        let err = m.login_with_setup_key("short".into()).await.unwrap_err();
+        assert!(
+            err.message.contains("Tailscale auth key"),
+            "{}",
+            err.message
+        );
+
+        // The NetBird login is still there when switching back.
+        m.set_network(Network::Netbird, String::new()).await.ok();
+        assert!(m.has_saved_login());
+        m.shutdown().await;
     }
 }

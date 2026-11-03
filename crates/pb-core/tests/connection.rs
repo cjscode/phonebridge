@@ -11,7 +11,7 @@ use pb_core::connection::{
     self, ConnectionConfig, ConnectionHandle, ConnectionStatus, PhoneConfig,
 };
 use pb_core::forwarder::{BoxFuture, BoxStream, Dialer};
-use pb_core::overlay::{DialError, NetSnapshot, NetState, Peer, PeerLink};
+use pb_core::overlay::{DialError, NetSnapshot, NetState, Network, Peer, PeerLink};
 use pb_core::tools::BundledTools;
 use tokio::sync::watch;
 
@@ -275,6 +275,33 @@ async fn offline_peer_is_unreachable_then_recovers() {
     rig.net.send_replace(snapshot(true, true));
     rig.wait_for("connected", ConnectionStatus::is_connected)
         .await;
+    rig.handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn messages_name_the_network_in_use() {
+    let rig = Rig::new(true, false, DialMode::Timeout, true).await;
+    let mut ts = snapshot(true, false);
+    ts.kind = Network::Tailscale;
+    rig.net.send_replace(ts);
+    rig.handle.connect_now().await;
+    let s = rig
+        .wait_for("unreachable over Tailscale", |s| {
+            matches!(s, ConnectionStatus::PhoneUnreachable { detail, .. } if detail.contains("Tailscale"))
+        })
+        .await;
+    if let ConnectionStatus::PhoneUnreachable { detail, .. } = s {
+        assert!(detail.contains("isn't connected to Tailscale"), "{detail}");
+        assert!(!detail.contains("NetBird"), "{detail}");
+    }
+    let mut off = NetSnapshot::of(Network::Tailscale, NetState::Starting);
+    off.synced = false;
+    rig.net.send_replace(off);
+    rig.wait_for(
+        "Tailscale starting",
+        |s| matches!(s, ConnectionStatus::NetOffline { detail } if detail == "Tailscale starting…"),
+    )
+    .await;
     rig.handle.shutdown().await;
 }
 

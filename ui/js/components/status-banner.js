@@ -4,19 +4,20 @@
 import { call } from "../api.js";
 import { busy, h, replace } from "../dom.js";
 import { showToast } from "./toast.js";
-import { linkText, phoneName, state } from "../store.js";
+import { linkText, netLabel, phoneName, state } from "../store.js";
 
 export function renderPills() {
   const t = document.getElementById("net-pill");
   const c = document.getElementById("conn-pill");
   if (!t || !c) return;
   const kind = state.net?.state.kind ?? "starting";
+  const net = netLabel();
   const [tCls, tText] = {
-    running: ["ok", "NetBird online"],
-    needs_login: ["warn", "NetBird: logged out"],
-    error: ["err", "NetBird offline"],
-    stopped: ["err", "NetBird stopped"],
-  }[kind] ?? ["", "NetBird starting…"];
+    running: ["ok", `${net} online`],
+    needs_login: ["warn", `${net}: logged out`],
+    error: ["err", `${net} offline`],
+    stopped: ["err", `${net} stopped`],
+  }[kind] ?? ["", `${net} starting…`];
   if (kind === "running" && state.net?.health.length) {
     t.title = state.net.health.join("\n");
   } else {
@@ -32,7 +33,7 @@ export function renderPills() {
     reconnecting: ["warn", "Reconnecting…"],
     phone_needs_usb: ["warn", "Needs USB"],
     phone_unreachable: ["warn", "Phone unreachable"],
-    net_offline: ["warn", "Waiting for NetBird"],
+    net_offline: ["warn", `Waiting for ${net}`],
     unauthorized: ["warn", "Allow on phone"],
     disconnected: ["", "Disconnected"],
   }[s.kind] ?? ["", "No phone"];
@@ -51,6 +52,11 @@ function action(label, cmd, okMsg) {
       else if (r !== null && okMsg) showToast(okMsg);
     });
   return b;
+}
+
+/** End text with a full stop unless it already ends a sentence. @param {string} t */
+function sentence(t) {
+  return /[.?!]$/.test(t.trim()) ? t.trim() : `${t.trim()}.`;
 }
 
 export function renderBanner() {
@@ -82,10 +88,10 @@ export function renderBanner() {
         ];
         break;
       case "phone_unreachable":
-        b = ["warn", `Can't reach ${name}: ${s.detail ?? ""}.${retry}`, [action("Retry now", "connect_now")]];
+        b = ["warn", `Can't reach ${name}: ${sentence(s.detail ?? "")}${retry}`, [action("Retry now", "connect_now")]];
         break;
       case "net_offline":
-        b = ["warn", `Waiting for NetBird: ${s.detail ?? ""}`, []];
+        b = ["warn", `Waiting for ${netLabel()}: ${s.detail ?? ""}`, []];
         break;
       case "unauthorized":
         b = ["warn", `Unlock ${name} and tap "Allow" on the "Allow USB debugging?" prompt.`, []];

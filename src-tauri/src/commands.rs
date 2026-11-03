@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use pb_core::connection::{ConnectionStatus, PhoneConfig};
 use pb_core::forwarder::ForwarderStats;
-use pb_core::overlay::{NetSnapshot, NetState, Peer, SsoFlow};
+use pb_core::overlay::{NetSnapshot, NetState, Network, Peer, SsoFlow};
 use pb_core::presets::QualityPreset;
 use pb_core::procs::WindowInfo;
 use pb_core::scrcpy::{AndroidApp, LaunchMode, WindowOptions, window_args};
@@ -32,6 +32,8 @@ pub struct Overview {
     pub settings: Settings,
     pub windows: Vec<WindowInfo>,
     pub device_name: String,
+    pub network: Network,
+    /// Server of the current network (management URL or control URL).
     pub management_url: String,
     pub tools_error: Option<AppError>,
 }
@@ -45,12 +47,13 @@ pub fn get_overview(state: State<'_, SharedState>) -> Overview {
         settings: state.settings.get(),
         windows: state.procs.list(),
         device_name: state.net.device_name().to_string(),
+        network: state.net.network(),
         management_url: state.net.management_url(),
         tools_error: state.tools_error.clone(),
     }
 }
 
-// ---- NetBird ---------------------------------------------------------------
+// ---- Network (NetBird / Tailscale) -----------------------------------------
 
 pub fn open_url(app: &AppHandle, state: &SharedState, url: &str) -> Res<()> {
     *state.opened_auth_url.lock().unwrap() = Some(url.to_string());
@@ -96,7 +99,8 @@ pub async fn net_logout(state: State<'_, SharedState>) -> Res<()> {
     state.net.logout().await
 }
 
-/// Use a self-hosted NetBird server (logs out if the URL changes).
+/// Use a self-hosted server: NetBird management server or Headscale (logs
+/// out if the URL changes). Empty = the network's default.
 #[tauri::command]
 pub async fn net_set_management_url(
     app: AppHandle,
@@ -106,12 +110,44 @@ pub async fn net_set_management_url(
     state.procs.terminate_all(Duration::from_secs(2)).await;
     state.net.set_management_url(url).await?;
     let url = state.net.management_url();
+    let network = state.net.network();
     let s = state
         .settings
-        .update(|s| s.management_url = url.clone())
+        .update(|s| s.set_server_url(network, url.clone()))
         .map_err(settings_err)?;
     let _ = app.emit("settings", &s);
     Ok(url)
+}
+
+/// Switch between NetBird and Tailscale. Each keeps its own login and its own
+/// saved phone (the phone has a different address on each).
+#[tauri::command]
+pub async fn net_set_network(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    network: Network,
+) -> Res<Settings> {
+    if state.net.network() == network {
+        return Ok(state.settings.get());
+    }
+    tracing::info!("switching network to {network}");
+    state.procs.terminate_all(Duration::from_secs(2)).await;
+    // Clear the phone first so the status pump never saves the old network's
+    // phone under the new network.
+    state.conn.set_phone(None).await;
+    *state.opened_auth_url.lock().unwrap() = None;
+    let s = state
+        .settings
+        .update(|s| s.switch_network(network))
+        .map_err(settings_err)?;
+    let _ = app.emit("settings", &s);
+    let start = state.net.set_network(network, s.server_url(network)).await;
+    state.conn.set_phone(s.phone.clone()).await;
+    // First time on this network: start the browser login right away.
+    if start.is_ok() && !state.net.has_saved_login() {
+        state.net.login_browser().await?;
+    }
+    start.map(|()| s)
 }
 
 // ---- Phone setup -----------------------------------------------------------
@@ -119,7 +155,7 @@ pub async fn net_set_management_url(
 #[derive(Serialize)]
 pub struct UsbDetect {
     pub phone: UsbPhone,
-    /// NetBird peer whose IP matches one of the phone's addresses.
+    /// Network peer whose IP matches one of the phone's addresses.
     pub suggested_peer_id: Option<String>,
     /// Peers to choose from (Android first).
     pub peers: Vec<Peer>,
@@ -132,9 +168,9 @@ fn require_net(state: &SharedState) -> Res<NetSnapshot> {
     } else {
         Err(AppError::new(
             ErrorCode::NotLoggedIn,
-            "PhoneBridge isn't connected to NetBird yet",
+            format!("PhoneBridge isn't connected to {} yet", snap.kind),
         )
-        .hint("Log in to NetBird first."))
+        .hint(format!("Log in to {} first.", snap.kind)))
     }
 }
 
@@ -142,7 +178,7 @@ fn require_net(state: &SharedState) -> Res<NetSnapshot> {
 pub async fn usb_detect(state: State<'_, SharedState>) -> Res<UsbDetect> {
     let mut snap = require_net(&state)?;
     let phone = setup::find_usb_phone(&state.adb).await?;
-    // Right after NetBird starts, the peer list may not have arrived yet.
+    // Right after the network starts, the peer list may not have arrived yet.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !snap.synced && std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -156,7 +192,7 @@ pub async fn usb_detect(state: State<'_, SharedState>) -> Res<UsbDetect> {
     })
 }
 
-/// Enable adb over TCP on the USB phone and remember the chosen NetBird peer.
+/// Enable adb over TCP on the USB phone and remember the chosen network peer.
 #[tauri::command]
 pub async fn usb_setup(
     app: AppHandle,
@@ -168,14 +204,19 @@ pub async fn usb_setup(
     let peer = snap.peer_by_id(&peer_id).cloned().ok_or_else(|| {
         AppError::new(
             ErrorCode::BadInput,
-            "That device is no longer in your NetBird network",
+            format!("That device is no longer in your {} network", snap.kind),
         )
     })?;
     let ip = peer
         .ipv4()
         .map(std::net::IpAddr::V4)
         .or_else(|| peer.ips.first().copied())
-        .ok_or_else(|| AppError::new(ErrorCode::BadInput, "That device has no NetBird IP"))?;
+        .ok_or_else(|| {
+            AppError::new(
+                ErrorCode::BadInput,
+                format!("That device has no {} IP", snap.kind),
+            )
+        })?;
     setup::enable_tcpip(&state.adb, &serial, 5555).await?;
     let phone = PhoneConfig {
         node_id: peer.id.clone(),
@@ -214,9 +255,10 @@ pub async fn usb_reenable(state: State<'_, SharedState>) -> Res<Reenabled> {
         .ips
         .iter()
         .any(|ip| std::net::IpAddr::V4(*ip) == saved.ip);
+    let net = state.net.network();
     let warning = (!has_saved_ip).then(|| {
         format!(
-            "The phone on USB doesn't have {}'s NetBird address ({}). Either NetBird isn't connected on the phone (open the NetBird app), or this is a different phone (use \"Set up via USB\").",
+            "The phone on USB doesn't have {}'s {net} address ({}). Either {net} isn't connected on the phone (open the {net} app), or this is a different phone (use \"Set up via USB\").",
             saved.name, saved.ip
         )
     });
@@ -406,9 +448,10 @@ pub struct Diagnostics {
     pub adb_server_port: u16,
     pub forwarder_port: Option<u16>,
     pub forwarder_stats: Option<ForwarderStats>,
-    pub netbird_device_name: String,
-    pub netbird_management_url: String,
-    pub netbird_state_dir: String,
+    pub network: Network,
+    pub net_device_name: String,
+    pub net_server_url: String,
+    pub net_state_dir: String,
     pub data_dir: String,
     pub log_dir: String,
     /// Other adb/scrcpy installs on this Mac (informational: we never use them).
@@ -442,9 +485,10 @@ pub async fn diagnostics(state: State<'_, SharedState>) -> Res<Diagnostics> {
         adb_server_port: state.tools.adb_server_port,
         forwarder_port: state.conn.forwarder_port(),
         forwarder_stats: state.conn.forwarder_stats(),
-        netbird_device_name: state.net.device_name().to_string(),
-        netbird_management_url: state.net.management_url(),
-        netbird_state_dir: state.net.state_dir().display().to_string(),
+        network: state.net.network(),
+        net_device_name: state.net.device_name().to_string(),
+        net_server_url: state.net.management_url(),
+        net_state_dir: state.net.state_dir().display().to_string(),
         data_dir: state.data_dir.display().to_string(),
         log_dir: state.log_dir.display().to_string(),
         system_copies,

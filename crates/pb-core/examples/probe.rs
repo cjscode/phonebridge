@@ -8,7 +8,7 @@
 //!   cargo run -p pb-core --example probe -- dial 100.x.y.z:5555
 //!   cargo run -p pb-core --example probe -- forward 100.x.y.z
 //!   cargo run -p pb-core --example probe -- adb-test 100.x.y.z
-//!   cargo run -p pb-core --example probe -- scrcpy 100.x.y.z [--force-adb-forward]
+//!   cargo run -p pb-core --example probe -- scrcpy 100.x.y.z [--force-adb-forward] [--app PACKAGE]
 //!
 //! Options (before the command): --network netbird|tailscale (default netbird),
 //! --state DIR (default: a "probe-state" folder in the build cache, separate
@@ -34,7 +34,7 @@ use pb_core::tools::BundledTools;
 fn usage() -> ExitCode {
     eprintln!(
         "usage: probe [--network netbird|tailscale] [--state DIR] [--name NAME] [--setup-key KEY] [--server-url URL] [--relogin] \
-         <login|status|peers|dial IP:PORT|forward IP|adb-test IP|scrcpy IP [--force-adb-forward]>"
+         <login|status|peers|dial IP:PORT|forward IP|adb-test IP|scrcpy IP [--force-adb-forward] [--app PACKAGE]>"
     );
     ExitCode::from(2)
 }
@@ -102,6 +102,7 @@ async fn main() -> ExitCode {
     };
     let force_forward = flag("--force-adb-forward");
     let relogin = flag("--relogin");
+    let app_pkg = opt_after(&mut args, "--app");
     let Some(cmd) = args.first().cloned() else {
         return usage();
     };
@@ -158,7 +159,7 @@ async fn main() -> ExitCode {
             None => return usage(),
         },
         "scrcpy" => match arg.and_then(|a| a.parse::<IpAddr>().ok()) {
-            Some(ip) => cmd_scrcpy(&tn, ip, force_forward).await,
+            Some(ip) => cmd_scrcpy(&tn, ip, force_forward, app_pkg).await,
             None => return usage(),
         },
         _ => return usage(),
@@ -480,7 +481,19 @@ async fn cmd_adb_test(tn: &Arc<NetManager>, ip: IpAddr) -> R {
     res
 }
 
-async fn cmd_scrcpy(tn: &Arc<NetManager>, ip: IpAddr, force_forward: bool) -> R {
+/// Remove `name VALUE` from `args` (options given after the command).
+fn opt_after(args: &mut Vec<String>, name: &str) -> Option<String> {
+    let i = args.iter().position(|a| a == name)?;
+    args.remove(i);
+    (i < args.len()).then(|| args.remove(i))
+}
+
+async fn cmd_scrcpy(
+    tn: &Arc<NetManager>,
+    ip: IpAddr,
+    force_forward: bool,
+    app_pkg: Option<String>,
+) -> R {
     let tools = tools()?;
     let adb = Adb::new(tools.clone());
     let fwd = start_forwarder(tn, ip).await?;
@@ -489,10 +502,30 @@ async fn cmd_scrcpy(tn: &Arc<NetManager>, ip: IpAddr, force_forward: bool) -> R 
         adb_connect(&adb, &serial).await?;
         let scrcpy = pb_core::scrcpy::Scrcpy::new(tools.clone());
         println!("scrcpy: {}", scrcpy.version().await.unwrap_or_default());
-        let mut args = vec![format!("--serial={serial}"), "-V".into(), "debug".into(), "--max-size=1024".into()];
-        if force_forward {
-            args.push("--force-adb-forward".into());
-        }
+        let mut args = match &app_pkg {
+            // Exactly what the app runs for an app window (Wi-Fi preset, default options).
+            Some(pkg) => pb_core::scrcpy::window_args(
+                &serial,
+                pb_core::presets::QualityPreset::Wifi,
+                &pb_core::scrcpy::LaunchMode::App {
+                    package: pkg.clone(),
+                    name: pkg.clone(),
+                },
+                &pb_core::scrcpy::WindowOptions {
+                    force_adb_forward: force_forward,
+                    ..Default::default()
+                },
+            ),
+            None => {
+                let mut a = vec![format!("--serial={serial}"), "--max-size=1024".into()];
+                if force_forward {
+                    a.push("--force-adb-forward".into());
+                }
+                a
+            }
+        };
+        args.insert(1, "-V".into());
+        args.insert(2, "debug".into());
         println!("running scrcpy {}  (close the window to finish)", args.join(" "));
         let before = fwd.stats();
         let mut child = scrcpy

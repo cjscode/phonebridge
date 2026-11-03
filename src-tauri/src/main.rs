@@ -297,20 +297,20 @@ fn spawn_pumps(app: &AppHandle, state: &SharedState) {
                         && !requested
                         && !st.shutting_down.load(Ordering::Acquire)
                     {
-                        let reason = stderr_tail
-                            .iter()
-                            .rev()
-                            .find(|l| l.contains("ERROR") || l.contains("error"))
-                            .or(stderr_tail.last())
-                            .cloned()
-                            .unwrap_or_else(|| format!("exit code {code:?}"));
-                        report_error(
-                            &h,
-                            AppError::new(
-                                ErrorCode::Scrcpy,
-                                format!("{} window closed: {reason}", window.label),
-                            ),
+                        tracing::error!(
+                            "{} window exited ({code:?}); scrcpy said:\n{}",
+                            window.label,
+                            stderr_tail.join("\n")
                         );
+                        let (reason, details) = pb_core::scrcpy::explain_exit(stderr_tail, *code);
+                        let mut err = AppError::new(
+                            ErrorCode::Scrcpy,
+                            format!("{} window closed: {reason}", window.label),
+                        );
+                        if !details.is_empty() {
+                            err = err.hint(details.join(" · "));
+                        }
+                        report_error(&h, err);
                     }
                     let _ = h.emit("windows", st.procs.list());
                 }

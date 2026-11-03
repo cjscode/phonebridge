@@ -106,6 +106,35 @@ pub fn window_args(
     a
 }
 
+/// Why a scrcpy window failed, from the end of its stderr: the first real
+/// error (scrcpy's last line is often a generic "Server connection failed"),
+/// plus the other error lines as detail.
+pub fn explain_exit(stderr_tail: &[String], code: Option<i32>) -> (String, Vec<String>) {
+    const GENERIC: [&str; 2] = ["Server connection failed", "Device disconnected"];
+    let is_err = |l: &str| {
+        l.contains("ERROR")
+            || l.contains("Exception")
+            || l.contains("adb: error")
+            || l.contains("error:")
+            || l.contains("Could not")
+    };
+    let errors: Vec<&String> = stderr_tail.iter().filter(|l| is_err(l)).collect();
+    let reason = errors
+        .iter()
+        .find(|l| !GENERIC.iter().any(|g| l.contains(g)))
+        .or(errors.first())
+        .map(|l| l.trim().trim_start_matches("ERROR:").trim().to_string())
+        .or_else(|| stderr_tail.last().map(|l| l.trim().to_string()))
+        .unwrap_or_else(|| format!("exit code {code:?}"));
+    let details = errors
+        .iter()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.ends_with(&reason))
+        .take(4)
+        .collect();
+    (reason, details)
+}
+
 /// Parse the output of `scrcpy --list-apps`.
 ///
 /// Server format (LogUtils.buildAppListMessage): `" * "` (system) or `" - "`,
@@ -238,6 +267,33 @@ impl Scrcpy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_reason_prefers_the_first_real_error() {
+        let tail: Vec<String> = [
+            "INFO: scrcpy 5.0.1 <https://github.com/Genymobile/scrcpy>",
+            "[server] ERROR: Could not create display",
+            "java.lang.SecurityException: Requires permission",
+            "ERROR: Server connection failed",
+        ]
+        .map(String::from)
+        .to_vec();
+        let (reason, details) = explain_exit(&tail, Some(1));
+        assert_eq!(reason, "[server] ERROR: Could not create display");
+        assert!(details.iter().any(|d| d.contains("SecurityException")));
+        assert!(
+            details
+                .iter()
+                .any(|d| d.contains("Server connection failed"))
+        );
+
+        let only_generic = vec!["ERROR: Server connection failed".to_string()];
+        assert_eq!(
+            explain_exit(&only_generic, Some(1)).0,
+            "Server connection failed"
+        );
+        assert_eq!(explain_exit(&[], Some(2)).0, "exit code Some(2)");
+    }
 
     const LIST: &str = include_str!("../tests/fixtures/list_apps.txt");
 

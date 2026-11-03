@@ -147,7 +147,7 @@ impl ProcessRegistry {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "scrcpy", "[{label}] {line}");
+                    tracing::info!(target: "scrcpy", "[{label}] {line}");
                     let mut t = tail.lock().unwrap();
                     if t.len() == STDERR_LINES {
                         t.pop_front();

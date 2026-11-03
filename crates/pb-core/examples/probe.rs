@@ -323,8 +323,42 @@ async fn wait_running(tn: &Arc<NetManager>, limit: Duration) -> Result<NetSnapsh
     }
 }
 
+/// Show the phone's peer state, and give the network up to 20 s to connect
+/// to it (so a dial right after start doesn't race the connection).
+async fn wait_for_peer(tn: &Arc<NetManager>, mut snap: NetSnapshot, ip: IpAddr) {
+    let net = snap.kind;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match snap.peer_by_ip(ip) {
+            Some(p) if p.online => {
+                println!("phone peer: {} online, link {:?}", p.display_name(), p.link);
+                return;
+            }
+            Some(p) if Instant::now() >= deadline => {
+                println!(
+                    "phone peer: {} is NOT connected after 20 s (link {:?}). Is the {net} app on the phone on and connected, and is the phone awake with signal? Trying anyway…",
+                    p.display_name(),
+                    p.link
+                );
+                return;
+            }
+            None if snap.synced && Instant::now() >= deadline => {
+                println!(
+                    "no {net} peer has {ip}: check the phone's address with `probe peers` (it differs between NetBird and Tailscale). Trying anyway…"
+                );
+                return;
+            }
+            _ if Instant::now() >= deadline => return,
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        snap = tn.refresh().await;
+    }
+}
+
 async fn cmd_dial(tn: &Arc<NetManager>, addr: SocketAddr) -> R {
-    wait_running(tn, Duration::from_secs(60)).await?;
+    let snap = wait_running(tn, Duration::from_secs(60)).await?;
+    wait_for_peer(tn, snap, addr.ip()).await;
     let dialer = tn.dialer();
     let t = Instant::now();
     match dialer.dial(addr).await {
@@ -348,7 +382,8 @@ async fn cmd_dial(tn: &Arc<NetManager>, addr: SocketAddr) -> R {
 }
 
 async fn start_forwarder(tn: &Arc<NetManager>, ip: IpAddr) -> Result<Arc<Forwarder>, String> {
-    wait_running(tn, Duration::from_secs(60)).await?;
+    let snap = wait_running(tn, Duration::from_secs(60)).await?;
+    wait_for_peer(tn, snap, ip).await;
     let listener = bind_loopback(None).await.map_err(|e| e.to_string())?;
     let fwd = Forwarder::start(listener, SocketAddr::new(ip, 5555), tn.dialer())
         .map_err(|e| e.to_string())?;
